@@ -1,0 +1,56 @@
+[package]
+name = "yank"
+version = "0.1.0"
+edition = "2021"
+description = "Pull videos with yt-dlp and trim them frame-accurately"
+
+[dependencies]
+# GUI + GPU-backed texture upload for the video preview
+# `persistence` stores settings (UI scale) between sessions.
+eframe = { version = "0.29", features = ["persistence"] }
+egui = "0.29"
+# SVG button icons (floppy/download), via egui's image-loader infrastructure.
+egui_extras = { version = "0.29", features = ["svg"] }
+
+# FFmpeg bindings (links libav*). 1.2 supports a wide FFmpeg range incl. 4.4.
+# Bump this once you upgrade FFmpeg (2.x => FFmpeg 7).
+ffmpeg-the-third = "1.2"
+
+# native file open/save dialogs
+rfd = "0.15"
+
+# audio output for synced playback (no std equivalent)
+cpal = "0.15"
+
+# parse `yt-dlp -J` metadata
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+anyhow = "1"
+
+[features]
+# Default builds link the system FFmpeg dynamically (fast, for development).
+#
+# `static-ffmpeg` instead compiles FFmpeg from source and links it statically, so
+# the resulting binary carries no libav* runtime dependency — what we ship to
+# users. It pulls in the encoders the app actually uses: x264 (H.264 — there is
+# no native H.264 encoder), libvpx (VP9/WebM), libopus (Opus/WebM), libmp3lame
+# (MP3 audio). x264 makes the binary GPL, so `build-license-gpl` is required.
+#
+# This build is for CI / a toolchain-equipped machine, NOT the no-sudo dev box:
+# it needs `nasm` (or `yasm`) to assemble FFmpeg/x264, plus STATIC builds of
+# libx264 / libvpx / libopus / libmp3lame for a dependency-free binary, and it
+# git-clones the FFmpeg source at build time. Build with:
+#   cargo build --release --features static-ffmpeg
+static-ffmpeg = [
+    "ffmpeg-the-third/build",
+    "ffmpeg-the-third/build-lib-x264",
+    "ffmpeg-the-third/build-lib-vpx",
+    "ffmpeg-the-third/build-lib-opus",
+    "ffmpeg-the-third/build-lib-mp3lame",
+    "ffmpeg-the-third/build-license-gpl",
+]
+
+[profile.dev]
+# ffmpeg + image decode are painfully slow without some optimization
+opt-level = 1

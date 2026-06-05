@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=yt-dlp-clipper
+Comment=Pull videos with yt-dlp and trim them frame-accurately
+Exec=yt-dlp-clipper
+Icon=yt-dlp-clipper
+Categories=AudioVideo;Video;
+Terminal=false
