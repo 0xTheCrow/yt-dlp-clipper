@@ -4,7 +4,8 @@
 //! frame, and its audio is re-encoded and trimmed to the exact sample (a stream
 //! copy can't split a packet, so an exact `in`/`out` requires re-encoding).
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
+use std::sync::atomic::{AtomicBool, Ordering};
 use ffmpeg_the_third as ffmpeg;
 use ffmpeg::channel_layout::ChannelLayout;
 use ffmpeg::format::Pixel;
@@ -82,12 +83,26 @@ pub struct ExportSpec {
 }
 
 pub fn export(spec: &ExportSpec) -> Result<()> {
+    export_cancellable(spec, &AtomicBool::new(false))
+}
+
+/// Like `export`, but aborts (returning an error) once `cancel` is set. The flag
+/// is checked between packets, so a cancel takes effect within one packet.
+pub fn export_cancellable(spec: &ExportSpec, cancel: &AtomicBool) -> Result<()> {
     ffmpeg::init()?;
     match spec.mode {
-        Mode::Full => export_full(spec),
-        Mode::AudioOnly(format) => export_audio_only(spec, format),
-        Mode::Clip => export_clip(spec),
+        Mode::Full => export_full(spec, cancel),
+        Mode::AudioOnly(format) => export_audio_only(spec, format, cancel),
+        Mode::Clip => export_clip(spec, cancel),
     }
+}
+
+/// Error out when the export has been cancelled, so the encode loop unwinds.
+fn check_cancel(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        bail!("export cancelled");
+    }
+    Ok(())
 }
 
 /// File extension for an audio-only export of `input` in `format`. For a
@@ -186,7 +201,7 @@ fn audio_encode_codec(container: Container) -> ffmpeg::codec::Id {
 
 /// Save the whole file in the chosen container, stream-copying every stream that
 /// the container can hold and re-encoding only those it cannot.
-fn export_full(spec: &ExportSpec) -> Result<()> {
+fn export_full(spec: &ExportSpec, cancel: &AtomicBool) -> Result<()> {
     let container = container_kind(&spec.output);
     let ictx = ffmpeg::format::input(&spec.input)?;
     // Downscaling can't be done by a stream copy, so it forces a re-encode.
@@ -205,14 +220,14 @@ fn export_full(spec: &ExportSpec) -> Result<()> {
     drop(ictx);
 
     if video_ok && audio_ok && !downscale {
-        remux_copy(spec)
+        remux_copy(spec, cancel)
     } else {
-        transcode(spec, container, false)
+        transcode(spec, container, false, cancel)
     }
 }
 
 /// Remux every stream of the whole file into the output container (copy only).
-fn remux_copy(spec: &ExportSpec) -> Result<()> {
+fn remux_copy(spec: &ExportSpec, cancel: &AtomicBool) -> Result<()> {
     let mut ictx = ffmpeg::format::input(&spec.input)?;
     let mut octx = ffmpeg::format::output(&spec.output)?;
 
@@ -238,6 +253,7 @@ fn remux_copy(spec: &ExportSpec) -> Result<()> {
 
     let mut packet = ffmpeg::Packet::empty();
     while packet.read(&mut ictx).is_ok() {
+        check_cancel(cancel)?;
         if let Some((out_index, in_tb)) = mapping[packet.stream()] {
             let out_tb = octx.stream(out_index).unwrap().time_base();
             packet.rescale_ts(in_tb, out_tb);
@@ -251,16 +267,16 @@ fn remux_copy(spec: &ExportSpec) -> Result<()> {
 }
 
 /// Copy the audio packets that fall within the window into a new container.
-fn export_audio_only(spec: &ExportSpec, format: AudioFormat) -> Result<()> {
+fn export_audio_only(spec: &ExportSpec, format: AudioFormat, cancel: &AtomicBool) -> Result<()> {
     match format {
-        AudioFormat::Original => export_audio_copy(spec),
-        AudioFormat::Mp3 => export_audio_reencode(spec, ffmpeg::codec::Id::MP3),
-        AudioFormat::Aac => export_audio_reencode(spec, ffmpeg::codec::Id::AAC),
+        AudioFormat::Original => export_audio_copy(spec, cancel),
+        AudioFormat::Mp3 => export_audio_reencode(spec, ffmpeg::codec::Id::MP3, cancel),
+        AudioFormat::Aac => export_audio_reencode(spec, ffmpeg::codec::Id::AAC, cancel),
     }
 }
 
 /// Stream-copy the windowed audio into the output container, losslessly.
-fn export_audio_copy(spec: &ExportSpec) -> Result<()> {
+fn export_audio_copy(spec: &ExportSpec, cancel: &AtomicBool) -> Result<()> {
     let mut ictx = ffmpeg::format::input(&spec.input)?;
     let mut octx = ffmpeg::format::output(&spec.output)?;
 
@@ -289,6 +305,7 @@ fn export_audio_copy(spec: &ExportSpec) -> Result<()> {
 
     let mut packet = ffmpeg::Packet::empty();
     while packet.read(&mut ictx).is_ok() {
+        check_cancel(cancel)?;
         if packet.stream() != in_index {
             continue;
         }
@@ -312,7 +329,11 @@ fn export_audio_copy(spec: &ExportSpec) -> Result<()> {
 
 /// Re-encode the windowed audio to `codec_id` (MP3 or AAC). The window is cut to
 /// the exact sample, not the nearest packet, by `AudioReenc`'s `atrim` filter.
-fn export_audio_reencode(spec: &ExportSpec, codec_id: ffmpeg::codec::Id) -> Result<()> {
+fn export_audio_reencode(
+    spec: &ExportSpec,
+    codec_id: ffmpeg::codec::Id,
+    cancel: &AtomicBool,
+) -> Result<()> {
     let mut ictx = ffmpeg::format::input(&spec.input)?;
     let mut octx = ffmpeg::format::output(&spec.output)?;
 
@@ -344,6 +365,7 @@ fn export_audio_reencode(spec: &ExportSpec, codec_id: ffmpeg::codec::Id) -> Resu
     let end_ts = (spec.end_secs / f64::from(in_tb)).round() as i64;
     let mut packet = ffmpeg::Packet::empty();
     while packet.read(&mut ictx).is_ok() {
+        check_cancel(cancel)?;
         if packet.stream() != in_index {
             continue;
         }
@@ -512,8 +534,8 @@ fn write_audio_packets(
 
 /// Save a frame-accurate clip in the chosen container. Video is always
 /// re-encoded for an exact `in` point; audio is copied or re-encoded to fit.
-fn export_clip(spec: &ExportSpec) -> Result<()> {
-    transcode(spec, container_kind(&spec.output), true)
+fn export_clip(spec: &ExportSpec, cancel: &AtomicBool) -> Result<()> {
+    transcode(spec, container_kind(&spec.output), true, cancel)
 }
 
 /// Add a video output stream sized to `w`×`h` at `fps`, encoded to the codec
@@ -725,7 +747,7 @@ impl AudioReenc {
 /// Write the file (whole, or `clip`'s window) into `container`, stream-copying
 /// each stream the container can hold and re-encoding the rest. Clips always
 /// re-encode video for a frame-accurate `in` point.
-fn transcode(spec: &ExportSpec, container: Container, clip: bool) -> Result<()> {
+fn transcode(spec: &ExportSpec, container: Container, clip: bool, cancel: &AtomicBool) -> Result<()> {
     let mut ictx = ffmpeg::format::input(&spec.input)?;
     let mut octx = ffmpeg::format::output(&spec.output)?;
     let global_header = octx
@@ -839,6 +861,7 @@ fn transcode(spec: &ExportSpec, container: Container, clip: bool) -> Result<()> 
 
     let mut packet = ffmpeg::Packet::empty();
     while packet.read(&mut ictx).is_ok() {
+        check_cancel(cancel)?;
         let idx = packet.stream();
         if idx == v_in_index {
             if let Some(vr) = v_reenc.as_mut() {

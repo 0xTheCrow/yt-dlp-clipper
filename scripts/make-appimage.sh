@@ -14,7 +14,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
-BUILD="$ROOT/build"
+BUILD="$ROOT/build/linux"         # per-target subdir; make-windows.{sh,ps1} use build/windows
 APPDIR="$BUILD/AppDir"
 export VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
 export APPIMAGE_EXTRACT_AND_RUN=1

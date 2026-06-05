@@ -42,6 +42,9 @@ cargo run -- <path>    # launch and open a local video
 
 ## Planned / TODO
 
+### Frame-step forward optimization (not built)
+`decoder::step_by`'s forward branch loops `step_forward()` for a net-positive step count, and each call runs `to_image()` to build a full `egui::ColorImage` that's then discarded for all but the last frame. Not a leak (intermediates are freed) and `n` is usually 1–2, but for a large net-forward jump it's wasted decode→convert churn. Optimization: decode *through* the intermediate frames without converting (only `to_image` the final one). Low priority.
+
 ### yt-dlp bundling + in-app update (mostly built)
 yt-dlp breaks often as sites change, so it must be kept current.
 - **Binary resolution + seeding (built)** — `resolve_ytdlp()`/`resolve_ffmpeg()`/`find_in_path()` in `main.rs` resolve to **absolute paths** (managed copy → next-to-exe (bundled) → PATH) at startup and pass them to `ytdlp::set_binary`/`set_ffmpeg` (global `OnceLock<PathBuf>`); every invocation uses the full path, never the bare name. yt-dlp is **seeded into a writable managed dir** (`storage_dir/bin/`, `0755`) so `yt-dlp -U` works even when installed read-only (`.app`/AppImage/`Program Files`). ffmpeg isn't seeded (never self-updates).
@@ -67,4 +70,10 @@ valid files from any source. Covered by `clip_transcodes_opus_audio_into_mp4` an
 `scripts/make-appimage.sh` produces a single self-contained `yt-dlp-clipper-<ver>-x86_64.AppImage`. It does **not** need the `static-ffmpeg` feature: it builds the normal **dynamic** release, then `linuxdeploy` bundles the app's `libav*`/`libasound` deps into the bundle (`RUNPATH=$ORIGIN/../lib`). It downloads and bundles a **static ffmpeg** (johnvansickle) and the self-contained **`yt-dlp_linux`** (the PyInstaller build — *not* the local python zipapp, which needs python3) into `usr/bin/` next to the exe, where the resolver finds them. Inputs: `packaging/yt-dlp-clipper.desktop` + `assets/yt-dlp-clipper.png`.
 - **No sudo to build** — `APPIMAGE_EXTRACT_AND_RUN=1` avoids FUSE for the tooling. `libfuse2` is only needed so the *output* AppImage runs on a double-click (else `--appimage-extract-and-run`).
 - Caveats: glibc is **not** bundled, so the AppImage runs on systems with glibc ≥ the build box's (build in an older container for wider reach); `libGL`/`libEGL` are `dlopen`ed and intentionally not bundled (present on every desktop).
+
+#### Windows bundle (built — native `.ps1` and Linux cross-build `.sh`)
+Two scripts produce the **same** self-contained `yt-dlp-clipper-<ver>-win64.zip` (app exe + `yt-dlp.exe` + `ffmpeg.exe` + FFmpeg DLLs, staged where the resolver finds them; whole bundle is GPL). Only `yank.exe` needs a Windows toolchain — it links libav* at build time via bindgen; `yt-dlp`/`ffmpeg` are pure runtime binaries we just download and stage.
+- `scripts/make-windows.ps1` — builds **natively on Windows** (MSVC + clang). Run on Windows.
+- `scripts/make-windows.sh` — **cross-compiles from Linux** (no Windows, no Wine) for `x86_64-pc-windows-msvc` via `cargo-xwin` (auto-fetches the MSVC CRT + Windows SDK into `build/windows/xwin/`). bindgen needs `BINDGEN_EXTRA_CLANG_ARGS` with `--target` + the splatted SDK include dirs to parse FFmpeg's headers *as Windows*; the exe links the MSVC CRT **statically** (`-C target-feature=+crt-static`) so it doesn't import `VCRUNTIME140.dll` (which ships with the VC++ redist, not Windows). Prereqs: `rustup target add x86_64-pc-windows-msvc`, `cargo install cargo-xwin`, and (sudo) `lld llvm clang p7zip-full zip`.
+- **FFmpeg dev libs must be 6.0** to match the `ffmpeg-sys-the-third 1.1.1+ffmpeg-6.0` pin (7.x dropped APIs it needs). BtbN's rolling `latest` no longer carries 6.x, so both scripts pull the archived **gyan 6.0** GitHub release (`GyanD/codexffmpeg`, a `.7z` — extracted with `7z` on Linux, bundled `tar.exe`/bsdtar on Windows 10 1803+). Its `lib/*.lib` are MSVC import libs, so they link under both `link.exe` (native) and `lld-link` (cross).
 </content>

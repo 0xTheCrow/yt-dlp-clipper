@@ -119,11 +119,29 @@ impl Decoder {
         Some(self.to_image(&mut frame))
     }
 
-    /// Step back exactly one frame: target the previous frame's pts and decode
-    /// forward to it from the nearest preceding keyframe.
-    pub fn step_backward(&mut self) -> Option<egui::ColorImage> {
-        let target = (self.current_pts - self.frame_dur_ts).max(0);
-        self.seek_exact(target)
+    /// Step `n` frames from the current position: forward (`n > 0`) decodes
+    /// ahead frame by frame; backward (`n < 0`) jumps back `|n|` frames in a
+    /// single seek, so rapid or held backward stepping stays responsive instead
+    /// of doing one seek per frame.
+    pub fn step_by(&mut self, n: i64) -> Option<egui::ColorImage> {
+        use std::cmp::Ordering;
+        match n.cmp(&0) {
+            Ordering::Greater => {
+                let mut image = None;
+                for _ in 0..n {
+                    match self.step_forward() {
+                        Some(img) => image = Some(img),
+                        None => break,
+                    }
+                }
+                image
+            }
+            Ordering::Less => {
+                let target = (self.current_pts - (-n) * self.frame_dur_ts).max(0);
+                self.seek_exact(target)
+            }
+            Ordering::Equal => None,
+        }
     }
 
     /// Frame-accurate scrub to `secs`.

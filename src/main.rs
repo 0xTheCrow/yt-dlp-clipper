@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use yank::audio::AudioPlayer;
 use yank::decoder::Decoder;
@@ -16,6 +17,8 @@ const DOWNLOAD_DIR_KEY: &str = "download_dir";
 const DELETE_ON_EXIT_KEY: &str = "delete_cache_on_exit";
 const VOLUME_KEY: &str = "volume";
 const KEYBINDS_KEY: &str = "keybinds";
+const OUTPUT_DIR_KEY: &str = "output_dir";
+const THEME_KEY: &str = "theme";
 
 /// Standard heights offered when downscaling a saved video, tallest first. Only
 /// those shorter than the source are shown, so the menu never upscales.
@@ -23,6 +26,13 @@ const EXPORT_HEIGHT_LADDER: [u32; 8] = [2160, 1440, 1080, 720, 480, 360, 240, 14
 
 /// Inner padding applied to every button, enlarging the click target.
 const BUTTON_PAD: egui::Vec2 = egui::Vec2::new(10.0, 6.0);
+
+/// Seconds skipped by the skip-back / skip-forward keys.
+const SKIP_SECS: f64 = 5.0;
+/// Held nav key: how long before auto-repeat begins, then the interval between
+/// repeats (seconds). Keeps a held key from firing too fast.
+const NAV_REPEAT_DELAY: f64 = 0.3;
+const NAV_REPEAT_INTERVAL: f64 = 0.1;
 
 /// Inner margin for text input fields. Vertical padding is kept below
 /// `BUTTON_PAD.y` so inputs never stand taller than the buttons beside them.
@@ -64,82 +74,215 @@ fn button_height(ui: &egui::Ui) -> f32 {
 }
 
 /// A user-rebindable keyboard action.
+/// A bindable shortcut: a key plus whether Shift must be held. Shift lets the
+/// arrow keys carry two actions each (skip vs. single-frame step).
+#[derive(Clone, Copy, PartialEq)]
+struct Shortcut {
+    key: egui::Key,
+    shift: bool,
+}
+
+impl Shortcut {
+    const fn plain(key: egui::Key) -> Self {
+        Self { key, shift: false }
+    }
+    const fn shifted(key: egui::Key) -> Self {
+        Self { key, shift: true }
+    }
+    /// Label for the settings button, e.g. "Space" or "Shift+ArrowLeft".
+    fn label(self) -> String {
+        if self.shift {
+            format!("Shift+{}", self.key.name())
+        } else {
+            self.key.name().to_owned()
+        }
+    }
+}
+
+/// True on the frame `sc` is pressed (with the exact Shift state). For one-shot
+/// actions like set-start / play-pause.
+fn shortcut_pressed(i: &egui::InputState, sc: Shortcut) -> bool {
+    i.key_pressed(sc.key) && i.modifiers.shift == sc.shift
+}
+
+/// True while `sc` is held (exact Shift state). Paired with a manual timer for
+/// hold-to-repeat navigation.
+fn shortcut_down(i: &egui::InputState, sc: Shortcut) -> bool {
+    i.key_down(sc.key) && i.modifiers.shift == sc.shift
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Bind {
     SetStart,
     SetEnd,
+    PlayPauseClip,
     PlayPause,
+    SkipBack,
+    SkipForward,
+    StepBack,
+    StepForward,
 }
 
 impl Bind {
-    /// All actions, in display order, with their settings labels.
-    const ALL: [(Bind, &'static str); 3] = [
+    /// All actions, in display order (row-major: each consecutive pair forms one
+    /// two-column grid row), with their settings labels.
+    const ALL: [(Bind, &'static str); 8] = [
         (Bind::SetStart, "Set start"),
         (Bind::SetEnd, "Set end"),
+        (Bind::PlayPauseClip, "Play / pause clip"),
         (Bind::PlayPause, "Play / pause"),
+        (Bind::SkipForward, "Skip forward 5s"),
+        (Bind::SkipBack, "Skip back 5s"),
+        (Bind::StepForward, "Step forward 1 frame"),
+        (Bind::StepBack, "Step back 1 frame"),
     ];
+
+    /// Stable identifier for persistence, decoupled from display order so
+    /// reordering or adding actions never misreads an older save.
+    fn id(self) -> &'static str {
+        match self {
+            Bind::SetStart => "set_start",
+            Bind::SetEnd => "set_end",
+            Bind::PlayPauseClip => "play_pause_clip",
+            Bind::PlayPause => "play_pause",
+            Bind::SkipBack => "skip_back",
+            Bind::SkipForward => "skip_forward",
+            Bind::StepBack => "step_back",
+            Bind::StepForward => "step_forward",
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Bind> {
+        Bind::ALL.iter().map(|(b, _)| *b).find(|b| b.id() == id)
+    }
 }
 
-/// The configurable keys for the clip actions.
+/// The configurable shortcuts for the clip and playback actions.
 #[derive(Clone, Copy)]
 struct Keybinds {
-    set_start: egui::Key,
-    set_end: egui::Key,
-    play_pause: egui::Key,
+    set_start: Shortcut,
+    set_end: Shortcut,
+    play_pause_clip: Shortcut,
+    play_pause: Shortcut,
+    skip_back: Shortcut,
+    skip_forward: Shortcut,
+    step_back: Shortcut,
+    step_forward: Shortcut,
 }
 
 impl Default for Keybinds {
     fn default() -> Self {
         Self {
-            set_start: egui::Key::S,
-            set_end: egui::Key::E,
-            play_pause: egui::Key::Space,
+            set_start: Shortcut::plain(egui::Key::S),
+            set_end: Shortcut::plain(egui::Key::E),
+            play_pause_clip: Shortcut::plain(egui::Key::Space),
+            play_pause: Shortcut::shifted(egui::Key::Space),
+            skip_back: Shortcut::plain(egui::Key::ArrowLeft),
+            skip_forward: Shortcut::plain(egui::Key::ArrowRight),
+            step_back: Shortcut::shifted(egui::Key::ArrowLeft),
+            step_forward: Shortcut::shifted(egui::Key::ArrowRight),
         }
     }
 }
 
 impl Keybinds {
-    fn key(&self, bind: Bind) -> egui::Key {
+    fn shortcut(&self, bind: Bind) -> Shortcut {
         match bind {
             Bind::SetStart => self.set_start,
             Bind::SetEnd => self.set_end,
+            Bind::PlayPauseClip => self.play_pause_clip,
             Bind::PlayPause => self.play_pause,
+            Bind::SkipBack => self.skip_back,
+            Bind::SkipForward => self.skip_forward,
+            Bind::StepBack => self.step_back,
+            Bind::StepForward => self.step_forward,
         }
     }
 
-    fn put(&mut self, bind: Bind, key: egui::Key) {
+    fn put(&mut self, bind: Bind, sc: Shortcut) {
         match bind {
-            Bind::SetStart => self.set_start = key,
-            Bind::SetEnd => self.set_end = key,
-            Bind::PlayPause => self.play_pause = key,
+            Bind::SetStart => self.set_start = sc,
+            Bind::SetEnd => self.set_end = sc,
+            Bind::PlayPauseClip => self.play_pause_clip = sc,
+            Bind::PlayPause => self.play_pause = sc,
+            Bind::SkipBack => self.skip_back = sc,
+            Bind::SkipForward => self.skip_forward = sc,
+            Bind::StepBack => self.step_back = sc,
+            Bind::StepForward => self.step_forward = sc,
         }
     }
 
-    /// Bind `key` to `bind`. If another action already uses `key`, swap so it
-    /// takes `bind`'s old key — keeping every action on a distinct key.
-    fn rebind(&mut self, bind: Bind, key: egui::Key) {
-        let old = self.key(bind);
+    /// Bind `sc` to `bind`. If another action already uses `sc`, swap so it takes
+    /// `bind`'s old shortcut — keeping every action on a distinct shortcut.
+    fn rebind(&mut self, bind: Bind, sc: Shortcut) {
+        let old = self.shortcut(bind);
         for (other, _) in Bind::ALL {
-            if other != bind && self.key(other) == key {
+            if other != bind && self.shortcut(other) == sc {
                 self.put(other, old);
             }
         }
-        self.put(bind, key);
+        self.put(bind, sc);
     }
 }
 
-/// Dark theme with brighter text strokes than egui's default, raising the
-/// contrast of labels, readouts, and button captions against the background.
-fn high_contrast_visuals() -> egui::Visuals {
-    const BODY_TEXT: egui::Color32 = egui::Color32::from_gray(225);
-    const BUTTON_TEXT: egui::Color32 = egui::Color32::from_gray(235);
-
-    let mut visuals = egui::Visuals::dark();
-    visuals.widgets.noninteractive.fg_stroke.color = BODY_TEXT;
-    visuals.widgets.inactive.fg_stroke.color = BUTTON_TEXT;
-    visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
-    visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
+/// High-contrast text on top of egui's stock dark/light visuals: body/button
+/// text is pushed toward the extreme (near-white on dark, near-black on light)
+/// and hovered/active widgets go fully to the extreme.
+fn themed_visuals(theme: egui::Theme) -> egui::Visuals {
+    let (body, button, extreme) = match theme {
+        egui::Theme::Dark => (
+            egui::Color32::from_gray(225),
+            egui::Color32::from_gray(235),
+            egui::Color32::WHITE,
+        ),
+        egui::Theme::Light => (
+            egui::Color32::from_gray(30),
+            egui::Color32::from_gray(20),
+            egui::Color32::BLACK,
+        ),
+    };
+    let mut visuals = theme.default_visuals();
+    visuals.widgets.noninteractive.fg_stroke.color = body;
+    visuals.widgets.inactive.fg_stroke.color = button;
+    visuals.widgets.hovered.fg_stroke.color = extreme;
+    visuals.widgets.active.fg_stroke.color = extreme;
     visuals
+}
+
+/// Stable string for persisting the theme preference (egui's enum isn't
+/// serialized directly, mirroring how keybinds avoid egui's serde feature).
+fn theme_pref_name(pref: egui::ThemePreference) -> &'static str {
+    match pref {
+        egui::ThemePreference::Dark => "dark",
+        egui::ThemePreference::Light => "light",
+        egui::ThemePreference::System => "system",
+    }
+}
+
+fn theme_pref_from_name(name: &str) -> egui::ThemePreference {
+    match name {
+        "dark" => egui::ThemePreference::Dark,
+        "light" => egui::ThemePreference::Light,
+        _ => egui::ThemePreference::System,
+    }
+}
+
+/// Label shown in the Settings theme dropdown.
+fn theme_pref_label(pref: egui::ThemePreference) -> &'static str {
+    match pref {
+        egui::ThemePreference::Dark => "Dark",
+        egui::ThemePreference::Light => "Light",
+        egui::ThemePreference::System => "Match desktop",
+    }
+}
+
+/// Register both theme palettes + shared spacing on the context, then activate
+/// the chosen preference (egui resolves `System` against the desktop theme).
+fn apply_theme(ctx: &egui::Context, pref: egui::ThemePreference) {
+    ctx.set_visuals_of(egui::Theme::Dark, themed_visuals(egui::Theme::Dark));
+    ctx.set_visuals_of(egui::Theme::Light, themed_visuals(egui::Theme::Light));
+    ctx.all_styles_mut(|style| style.spacing.button_padding = BUTTON_PAD);
+    ctx.set_theme(pref);
 }
 
 /// Cross-platform directory for downloaded videos, under eframe's app data dir.
@@ -274,16 +417,13 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("yt-dlp-clipper")
             .with_inner_size([960.0, 720.0])
-            .with_min_inner_size([640.0, 480.0]),
+            .with_min_inner_size([800.0, 480.0]),
         ..Default::default()
     };
     eframe::run_native(
         STORAGE_APP_ID,
         options,
         Box::new(move |cc| {
-            cc.egui_ctx.set_visuals(high_contrast_visuals());
-            cc.egui_ctx
-                .style_mut(|style| style.spacing.button_padding = BUTTON_PAD);
             // Register the SVG (and other) image loaders so `egui::Image` /
             // `include_image!` can rasterize the button icons.
             egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -296,21 +436,30 @@ fn main() -> eframe::Result<()> {
                 }
                 app.download_dir = eframe::get_value::<Option<PathBuf>>(storage, DOWNLOAD_DIR_KEY)
                     .flatten();
+                app.output_dir = eframe::get_value::<Option<PathBuf>>(storage, OUTPUT_DIR_KEY)
+                    .flatten();
                 app.delete_cache_on_exit =
                     eframe::get_value(storage, DELETE_ON_EXIT_KEY).unwrap_or(false);
                 app.volume = eframe::get_value(storage, VOLUME_KEY).unwrap_or(0.5);
-                if let Some(keys) = eframe::get_value::<[String; 3]>(storage, KEYBINDS_KEY) {
-                    if let Some(k) = egui::Key::from_name(&keys[0]) {
-                        app.keybinds.set_start = k;
-                    }
-                    if let Some(k) = egui::Key::from_name(&keys[1]) {
-                        app.keybinds.set_end = k;
-                    }
-                    if let Some(k) = egui::Key::from_name(&keys[2]) {
-                        app.keybinds.play_pause = k;
+                if let Some(name) = eframe::get_value::<String>(storage, THEME_KEY) {
+                    app.theme = theme_pref_from_name(&name);
+                }
+                // Each shortcut persists as (action id, key name, shift). Keyed by
+                // a stable id so reordering/adding actions can't misread a save;
+                // unknown ids and absent actions just keep their defaults.
+                if let Some(saved) =
+                    eframe::get_value::<Vec<(String, String, bool)>>(storage, KEYBINDS_KEY)
+                {
+                    for (id, name, shift) in saved {
+                        if let (Some(bind), Some(key)) =
+                            (Bind::from_id(&id), egui::Key::from_name(&name))
+                        {
+                            app.keybinds.put(bind, Shortcut { key, shift });
+                        }
                     }
                 }
             }
+            apply_theme(&cc.egui_ctx, app.theme);
             if let Some(path) = cli_path {
                 app.load_video(PathBuf::from(path));
             }
@@ -324,6 +473,8 @@ enum Msg {
     Progress { downloaded: u64, total: u64 },
     Downloaded(PathBuf),
     Exported(PathBuf),
+    /// Export aborted via Cancel; carries the partial output path to delete.
+    ExportCanceled(PathBuf),
     Error(String),
     /// Result of a background `yt-dlp -U`: `Ok` carries yt-dlp's report,
     /// `Err` its failure text.
@@ -490,15 +641,40 @@ fn decoder_loop(path: String, req_rx: Receiver<DecodeRequest>, event_tx: Sender<
     }
 
     while let Ok(first) = req_rx.recv() {
-        let mut request = first;
-        while let Ok(newer) = req_rx.try_recv() {
-            request = newer;
+        // Fold the first request and any already-queued ones. Seeks collapse to
+        // the latest (a fast drag never backlogs); steps accumulate into a net
+        // frame delta so rapid/held stepping isn't dropped — and a multi-frame
+        // backward jump becomes a single seek rather than one seek per frame.
+        let mut seek: Option<f64> = None;
+        let mut steps: i64 = 0;
+        let mut gen = 0;
+        let mut req = Some(first);
+        while let Some(r) = req {
+            match r {
+                DecodeRequest::Seek { secs, gen: g } => {
+                    seek = Some(secs);
+                    steps = 0;
+                    gen = g;
+                }
+                DecodeRequest::StepForward { gen: g } => {
+                    steps += 1;
+                    gen = g;
+                }
+                DecodeRequest::StepBackward { gen: g } => {
+                    steps -= 1;
+                    gen = g;
+                }
+            }
+            req = req_rx.try_recv().ok();
         }
-        let (image, gen) = match request {
-            DecodeRequest::Seek { secs, gen } => (dec.seek_secs(secs), gen),
-            DecodeRequest::StepForward { gen } => (dec.step_forward(), gen),
-            DecodeRequest::StepBackward { gen } => (dec.step_backward(), gen),
-        };
+
+        let mut image = None;
+        if let Some(secs) = seek {
+            image = dec.seek_secs(secs);
+        }
+        if steps != 0 {
+            image = dec.step_by(steps);
+        }
         if let Some(image) = image {
             if event_tx
                 .send(DecodeEvent::Frame { image, secs: dec.current_secs(), gen })
@@ -631,19 +807,33 @@ struct App {
     ui_scale: f32,
     /// Scale being edited in Settings; applied to `ui_scale` only on Apply.
     pending_scale: f32,
+    /// Light/Dark/System appearance; `System` follows the desktop theme.
+    theme: egui::ThemePreference,
     show_settings: bool,
-    /// Configurable keys for set-start / set-end / play-pause.
+    /// Configurable shortcuts for clip + playback actions.
     keybinds: Keybinds,
     /// In Settings, the action whose next keypress is being captured, if any.
     rebinding: Option<Bind>,
+    /// Per nav action (skip back/fwd, step back/fwd) the input time at which a
+    /// held key may next fire; `0.0` means "not held" so the next press fires now.
+    nav_repeat_at: [f64; 4],
     /// Active download progress as `(downloaded, total)` bytes, if downloading.
     progress: Option<(u64, u64)>,
     /// True while an export (compile + save) runs on the worker thread; drives
     /// an indeterminate progress bar since the encode reports no fraction.
     exporting: bool,
+    /// Destination of the in-progress export, polled for its growing size to show
+    /// a "X so far" readout next to the bar; `None` when not exporting.
+    export_path: Option<PathBuf>,
+    /// Cancel flag for the in-flight export; set by the Cancel button, checked by
+    /// the encode loop. A fresh flag is created per export.
+    export_cancel: Arc<AtomicBool>,
 
     /// Where downloads are saved; `None` uses the managed cache directory.
     download_dir: Option<PathBuf>,
+    /// Default folder the export save dialog opens in; `None` uses the system
+    /// default. The dialog is always shown either way.
+    output_dir: Option<PathBuf>,
     /// Clear the managed cache directory when the app closes.
     delete_cache_on_exit: bool,
 
@@ -697,12 +887,17 @@ impl Default for App {
             out_secs: 0.0,
             ui_scale: 1.0,
             pending_scale: 1.0,
+            theme: egui::ThemePreference::System,
             show_settings: false,
             keybinds: Keybinds::default(),
             rebinding: None,
+            nav_repeat_at: [0.0; 4],
             progress: None,
             exporting: false,
+            export_path: None,
+            export_cancel: Arc::new(AtomicBool::new(false)),
             download_dir: None,
+            output_dir: None,
             delete_cache_on_exit: false,
             show_cache: false,
             cache_entries: Vec::new(),
@@ -768,6 +963,16 @@ impl App {
                     self.last_error = None;
                     self.progress = None;
                     self.exporting = false;
+                    self.export_path = None;
+                    return;
+                }
+                Ok(Msg::ExportCanceled(path)) => {
+                    // Drop the incomplete output so no truncated file is left behind.
+                    let _ = std::fs::remove_file(&path);
+                    self.status = "export canceled".into();
+                    self.progress = None;
+                    self.exporting = false;
+                    self.export_path = None;
                     return;
                 }
                 Ok(Msg::Error(e)) => {
@@ -777,6 +982,7 @@ impl App {
                     self.last_error = Some(e);
                     self.progress = None;
                     self.exporting = false;
+                    self.export_path = None;
                     return;
                 }
                 Ok(Msg::YtdlpUpdated(result)) => {
@@ -826,6 +1032,37 @@ impl App {
         self.awaiting_release = None;
     }
 
+    /// Seek `delta` seconds from the current position (clamped to the video) and
+    /// pin the playhead to the target until that frame lands. Builds on the last
+    /// *requested* target (a still-in-flight seek), not the decoder's reported
+    /// position, which lags on long videos — so a held key keeps advancing
+    /// instead of stalling on a stale `current_secs`.
+    fn skip_secs(&mut self, delta: f64) {
+        let Some((base, dur)) = self.decoder.as_ref().map(|dec| {
+            let base = self.awaiting_release.map_or(dec.current_secs, |(_, pos)| pos);
+            (base, dec.duration_secs)
+        }) else {
+            return;
+        };
+        let target = (base + delta).clamp(0.0, dur);
+        self.stop_play();
+        if let Some(gen) = self.decoder.as_ref().map(|dec| dec.seek_secs(target)) {
+            self.awaiting_release = Some((gen, target));
+        }
+    }
+
+    /// Step exactly one frame forward or backward.
+    fn step_frame(&mut self, forward: bool) {
+        self.stop_play();
+        if let Some(dec) = self.decoder.as_ref() {
+            if forward {
+                dec.step_forward();
+            } else {
+                dec.step_backward();
+            }
+        }
+    }
+
     /// Start playback from the current position (with audio if available), or
     /// stop if already playing.
     fn toggle_play(&mut self, now: f64) {
@@ -846,6 +1083,25 @@ impl App {
             .video_path
             .as_ref()
             .and_then(|p| AudioPlayer::start(&p.to_string_lossy(), pos, volume).ok());
+    }
+
+    /// Play/pause within the clip: pause if playing, else play to the out point,
+    /// resuming from the current spot when it's inside the clip and otherwise
+    /// starting from the in point.
+    fn toggle_play_clip(&mut self, now: f64) {
+        if self.playing {
+            self.stop_play();
+            return;
+        }
+        let Some(cur) = self.decoder.as_ref().filter(|d| d.ready).map(|d| d.current_secs) else {
+            return;
+        };
+        let start = if (self.in_secs..self.out_secs).contains(&cur) {
+            cur
+        } else {
+            self.in_secs
+        };
+        self.play_from(start, Some(self.out_secs), now);
     }
 
     /// Jump to `pos` and start playing from exactly there, stopping at `until`
@@ -1069,14 +1325,17 @@ impl App {
         }
     }
 
-    /// Prompt for a destination and run the export on a background thread.
+    /// Prompt for a destination and run the export on a background thread. A
+    /// configured output folder just preselects where the save dialog opens.
     fn start_export(&mut self, mode: Mode, ext: &str) {
         let Some(input) = self.video_path.clone() else { return };
         let base = self.video_title.as_deref().unwrap_or("video");
-        let Some(out) = rfd::FileDialog::new()
-            .set_file_name(format!("{}.{ext}", sanitize_filename(base)))
-            .save_file()
-        else {
+        let stem = sanitize_filename(base);
+        let mut dialog = rfd::FileDialog::new().set_file_name(format!("{stem}.{ext}"));
+        if let Some(dir) = &self.output_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(out) = dialog.save_file() else {
             return;
         };
 
@@ -1096,11 +1355,18 @@ impl App {
         };
         self.status = "exporting…".into();
         self.exporting = true;
+        self.export_path = Some(out);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.export_cancel = cancel.clone();
         self.spawn(move |tx| {
-            let _ = tx.send(match export::export(&spec) {
-                Ok(()) => Msg::Exported(PathBuf::from(spec.output)),
+            let output = PathBuf::from(spec.output.as_str());
+            let msg = match export::export_cancellable(&spec, &cancel) {
+                Ok(()) => Msg::Exported(output),
+                // A cancel makes the encode loop bail; tell them apart by the flag.
+                Err(_) if cancel.load(Ordering::Relaxed) => Msg::ExportCanceled(output),
                 Err(e) => Msg::Error(e.to_string()),
-            });
+            };
+            let _ = tx.send(msg);
         });
     }
 
@@ -1151,6 +1417,15 @@ impl App {
     /// Floating settings window. The scale slider edits a pending value and is
     /// only applied on Apply, so the UI doesn't reflow under the cursor mid-drag.
     fn settings_window(&mut self, ctx: &egui::Context) {
+        /// Fixed content width so the panel reads roomy and the keyboard
+        /// shortcuts fit comfortably in two columns.
+        const SETTINGS_WIDTH: f32 = 620.0;
+        /// Vertical breathing room placed around each section separator.
+        const SECTION_GAP: f32 = 8.0;
+        /// Width reserved for the scale slider's value field so the rail can fill
+        /// the rest of its column without the field overflowing.
+        const SCALE_VALUE_W: f32 = 64.0;
+
         let current = self.ui_scale;
         let mut pending = self.pending_scale;
         let mut apply_to = None;
@@ -1160,9 +1435,15 @@ impl App {
         let effective_dir = self.effective_download_dir();
         let mut delete_on_exit = self.delete_cache_on_exit;
         let mut new_download_dir: Option<Option<PathBuf>> = None;
+        let output_display = match &self.output_dir {
+            Some(d) => d.display().to_string(),
+            None => "Not set — dialog opens at the system default".to_owned(),
+        };
+        let mut new_output_dir: Option<Option<PathBuf>> = None;
         let mut clear_cache = false;
         let keybinds = self.keybinds;
         let mut rebinding = self.rebinding;
+        let mut theme = self.theme;
 
         // Lazily resolve the version once per open (cleared after an update so it
         // refetches); errors are cached too so it doesn't re-probe every frame.
@@ -1181,25 +1462,72 @@ impl App {
             .resizable(false)
             .collapsible(false)
             .show(ctx, |ui| {
-                ui.label("Interface scale");
-                ui.add(egui::Slider::new(&mut pending, 0.75..=2.5).step_by(0.05).suffix("×"));
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let changed = (pending - current).abs() > f32::EPSILON;
-                    ui.label(format!("current: {current:.2}×"));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Reset").clicked() {
-                            apply_to = Some(1.0);
-                        }
-                        if ui.add_enabled(changed, egui::Button::new("Apply")).clicked() {
-                            apply_to = Some(pending);
-                        }
-                    });
-                });
+                ui.set_width(SETTINGS_WIDTH);
+                // Interface scale (left) and Theme (right) share one row, with a
+                // vertical divider painted down the gutter between them.
+                let row = ui
+                    .scope(|ui| {
+                        ui.columns(2, |cols| {
+                            let ui = &mut cols[0];
+                            ui.label("Interface scale");
+                            let slider_w = (ui.available_width() - SCALE_VALUE_W).max(0.0);
+                            ui.spacing_mut().slider_width = slider_w;
+                            ui.add(
+                                egui::Slider::new(&mut pending, 0.75..=2.5)
+                                    .step_by(0.05)
+                                    .suffix("×"),
+                            );
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                let changed = (pending - current).abs() > f32::EPSILON;
+                                ui.label(format!("current: {current:.2}×"));
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("Reset").clicked() {
+                                            apply_to = Some(1.0);
+                                        }
+                                        if ui
+                                            .add_enabled(changed, egui::Button::new("Apply"))
+                                            .clicked()
+                                        {
+                                            apply_to = Some(pending);
+                                        }
+                                    },
+                                );
+                            });
 
+                            let ui = &mut cols[1];
+                            ui.label("Theme");
+                            egui::ComboBox::from_id_salt("theme_select")
+                                .selected_text(theme_pref_label(theme))
+                                .show_ui(ui, |ui| {
+                                    for pref in [
+                                        egui::ThemePreference::System,
+                                        egui::ThemePreference::Light,
+                                        egui::ThemePreference::Dark,
+                                    ] {
+                                        ui.selectable_value(&mut theme, pref, theme_pref_label(pref));
+                                    }
+                                });
+                            ui.small("“Match desktop” follows your OS light/dark setting.");
+                        });
+                    })
+                    .response
+                    .rect;
+                ui.painter().vline(
+                    row.center().x,
+                    egui::Rangef::new(row.top(), row.bottom()),
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
+
+                ui.add_space(SECTION_GAP);
                 ui.separator();
-                ui.label("Downloads");
-                ui.label(format!("Saved to: {}", effective_dir.display()));
+                ui.add_space(SECTION_GAP);
+                ui.horizontal(|ui| {
+                    ui.label("Downloads location:");
+                    ui.label(effective_dir.display().to_string());
+                });
                 ui.horizontal(|ui| {
                     if ui.button("Choose folder…").clicked() {
                         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
@@ -1220,26 +1548,57 @@ impl App {
                 ui.checkbox(&mut delete_on_exit, "Delete cache on exit");
                 ui.small("Clearing affects only the cache, not a custom folder.");
 
+                ui.add_space(SECTION_GAP);
                 ui.separator();
+                ui.add_space(SECTION_GAP);
+                ui.horizontal(|ui| {
+                    ui.label("Output location:");
+                    ui.label(output_display.as_str());
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Choose folder…").clicked() {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            new_output_dir = Some(Some(folder));
+                        }
+                    }
+                    if ui.button("Clear").clicked() {
+                        new_output_dir = Some(None);
+                    }
+                });
+
+                ui.add_space(SECTION_GAP);
+                ui.separator();
+                ui.add_space(SECTION_GAP);
                 ui.label("Keyboard shortcuts");
-                for (bind, label) in Bind::ALL {
-                    ui.horizontal(|ui| {
-                        ui.label(label);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let text = if rebinding == Some(bind) {
-                                "Press a key…".to_owned()
-                            } else {
-                                keybinds.key(bind).name().to_owned()
-                            };
-                            if ui.button(text).clicked() {
-                                rebinding = Some(bind);
-                            }
-                        });
+                ui.add_space(4.0);
+                // Two columns: each grid row holds two actions, label left and
+                // its key button right within each half.
+                let mut bind_row = |ui: &mut egui::Ui, bind: Bind, label: &str| {
+                    ui.label(label);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let text = if rebinding == Some(bind) {
+                            "Press a key…".to_owned()
+                        } else {
+                            keybinds.shortcut(bind).label()
+                        };
+                        if ui.button(text).clicked() {
+                            rebinding = Some(bind);
+                        }
                     });
+                };
+                for pair in Bind::ALL.chunks(2) {
+                    ui.columns(2, |cols| {
+                        for (col, (bind, label)) in cols.iter_mut().zip(pair) {
+                            col.horizontal(|ui| bind_row(ui, *bind, *label));
+                        }
+                    });
+                    ui.add_space(4.0);
                 }
                 ui.small("Click a key, then press the new key. Esc cancels.");
 
+                ui.add_space(SECTION_GAP);
                 ui.separator();
+                ui.add_space(SECTION_GAP);
                 ui.label("yt-dlp");
                 ui.horizontal(|ui| {
                     ui.label(format!("Version: {ytdlp_version}"));
@@ -1262,9 +1621,16 @@ impl App {
             self.pending_scale = scale;
             ctx.set_zoom_factor(scale);
         }
+        if theme != self.theme {
+            self.theme = theme;
+            apply_theme(ctx, theme);
+        }
         self.delete_cache_on_exit = delete_on_exit;
         if let Some(dir) = new_download_dir {
             self.download_dir = dir;
+        }
+        if let Some(dir) = new_output_dir {
+            self.output_dir = dir;
         }
         if clear_cache {
             clear_dir(&cache_dir);
@@ -1276,13 +1642,15 @@ impl App {
         if let Some(bind) = rebinding {
             let captured = ctx.input(|i| {
                 i.events.iter().find_map(|e| match e {
-                    egui::Event::Key { key, pressed: true, .. } => Some(*key),
+                    egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                        Some((*key, modifiers.shift))
+                    }
                     _ => None,
                 })
             });
-            if let Some(key) = captured {
+            if let Some((key, shift)) = captured {
                 if key != egui::Key::Escape {
-                    self.keybinds.rebind(bind, key);
+                    self.keybinds.rebind(bind, Shortcut { key, shift });
                 }
                 rebinding = None;
             }
@@ -1294,43 +1662,50 @@ impl App {
     fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label("URL:");
-                let url_field = ui.add(
-                    egui::TextEdit::singleline(&mut self.url)
-                        .desired_width(260.0)
-                        .margin(INPUT_MARGIN),
-                );
-                let submitted =
-                    url_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let fetch = icon_button(ui, download_icon(), "Fetch");
-                if (fetch.clicked() || submitted) && !self.url.is_empty() {
-                    let url = self.url.clone();
-                    self.status = "fetching…".into();
-                    self.spawn(move |tx| {
-                        let _ = tx.send(match ytdlp::fetch_info(&url) {
-                            Ok(info) => Msg::Info(info),
-                            Err(e) => Msg::Error(e.to_string()),
+            // Fixed-height row so the label, field, and buttons all center
+            // vertically (plain `horizontal` leaves the short label top-aligned
+            // once the taller field grows the row).
+            let row_h = button_height(ui);
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), row_h),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label("URL:");
+                    let url_field = ui.add_sized(
+                        [260.0, row_h],
+                        egui::TextEdit::singleline(&mut self.url).margin(INPUT_MARGIN),
+                    );
+                    let submitted =
+                        url_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let fetch = icon_button(ui, download_icon(), "Fetch");
+                    if (fetch.clicked() || submitted) && !self.url.is_empty() {
+                        let url = self.url.clone();
+                        self.status = "fetching…".into();
+                        self.spawn(move |tx| {
+                            let _ = tx.send(match ytdlp::fetch_info(&url) {
+                                Ok(info) => Msg::Info(info),
+                                Err(e) => Msg::Error(e.to_string()),
+                            });
                         });
+                    }
+                    if ui.button("Open file…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().pick_file() {
+                            self.load_video(p);
+                            self.url.clear();
+                            self.status.clear();
+                        }
+                    }
+                    if ui.button("Open from cache…").clicked() {
+                        self.open_cache_browser();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_button(ui, settings_icon(), "Settings").clicked() {
+                            self.show_settings = true;
+                            self.pending_scale = self.ui_scale;
+                        }
                     });
-                }
-                if ui.button("Open file…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().pick_file() {
-                        self.load_video(p);
-                        self.url.clear();
-                        self.status.clear();
-                    }
-                }
-                if ui.button("From cache").clicked() {
-                    self.open_cache_browser();
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_button(ui, settings_icon(), "Settings").clicked() {
-                        self.show_settings = true;
-                        self.pending_scale = self.ui_scale;
-                    }
-                });
-            });
+                },
+            );
 
             // Snapshot the available heights so the row closure doesn't hold a
             // borrow of `self.info` while also mutating `self`. These come from
@@ -1432,7 +1807,26 @@ impl App {
                 ui.add(egui::ProgressBar::new(frac).text(text));
             }
             if self.exporting {
-                ui.add(egui::ProgressBar::new(0.0).animate(true).text("compiling & saving…"));
+                let written = self
+                    .export_path
+                    .as_ref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map_or(0, |m| m.len());
+                let text = if written > 0 {
+                    format!("compiling & saving… {} so far", fmt_size(written))
+                } else {
+                    "compiling & saving…".to_owned()
+                };
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new());
+                    ui.label(text);
+                    if ui.button("Cancel").clicked() {
+                        self.export_cancel.store(true, Ordering::Relaxed);
+                        self.status = "canceling…".into();
+                    }
+                });
+                // Keep repainting so the size readout grows even without input.
+                ui.ctx().request_repaint();
             }
             ui.add_space(4.0);
         });
@@ -1532,8 +1926,8 @@ impl App {
 
         let in_time = fmt_time(self.in_secs);
         let out_time = fmt_time(self.out_secs);
-        let start_label = format!("⟦ Set Start ({})", self.keybinds.set_start.name());
-        let end_label = format!("Set End ({}) ⟧", self.keybinds.set_end.name());
+        let start_label = format!("⟦ Set Start ({})", self.keybinds.set_start.label());
+        let end_label = format!("Set End ({}) ⟧", self.keybinds.set_end.label());
         let left_w = btn_w(ui, &start_label) + gap + text_w(ui, &in_time, &mono_font);
         let right_w = text_w(ui, &out_time, &mono_font) + gap + btn_w(ui, &end_label);
         let center_w = btn_w(ui, "▶ Play Clip") + gap + btn_w(ui, "⏸ Pause");
@@ -1615,7 +2009,10 @@ impl App {
                     self.stop_play();
                     *nav = Some(Nav::Forward);
                 }
-                ui.monospace(format!("{}  /  {}", fmt_time(cur), fmt_time(dur)));
+                // Follow a pending seek target (held skip / released drag) like the
+                // playhead does, so the readout doesn't lag behind the position.
+                let shown = self.awaiting_release.map_or(cur, |(_, pos)| pos);
+                ui.monospace(format!("{}  /  {}", fmt_time(shown), fmt_time(dur)));
 
                 ui.separator();
                 ui.label("🔊");
@@ -1668,7 +2065,7 @@ impl App {
                         audio_format_label(Original),
                     );
                 });
-            if icon_button(ui, save_icon(), "Save audio only").clicked() {
+            if icon_button(ui, save_icon(), "Save audio only…").clicked() {
                 let fmt = self.audio_format;
                 let ext = self
                     .video_path
@@ -1682,10 +2079,10 @@ impl App {
             // Right group, added right-to-left so it reads: Video, Resolution,
             // Save full video, Save clip.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icon_button(ui, save_icon(), "Save clip").clicked() {
+                if icon_button(ui, save_icon(), "Save clip…").clicked() {
                     *export_req = Some((Mode::Clip, vid));
                 }
-                if icon_button(ui, save_icon(), "Save full video").clicked() {
+                if icon_button(ui, save_icon(), "Save full video…").clicked() {
                     *export_req = Some((Mode::Full, vid));
                 }
 
@@ -1732,14 +2129,19 @@ impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, SCALE_STORAGE_KEY, &self.ui_scale);
         eframe::set_value(storage, DOWNLOAD_DIR_KEY, &self.download_dir);
+        eframe::set_value(storage, OUTPUT_DIR_KEY, &self.output_dir);
         eframe::set_value(storage, DELETE_ON_EXIT_KEY, &self.delete_cache_on_exit);
         eframe::set_value(storage, VOLUME_KEY, &self.volume);
-        // Persist keys by name so we don't depend on egui's serde feature.
-        let keys: [String; 3] = [
-            self.keybinds.set_start.name().to_owned(),
-            self.keybinds.set_end.name().to_owned(),
-            self.keybinds.play_pause.name().to_owned(),
-        ];
+        eframe::set_value(storage, THEME_KEY, &theme_pref_name(self.theme).to_owned());
+        // Persist each shortcut as (key name, shift) so we don't depend on egui's
+        // serde feature; keyed by stable action id so the loader is order-proof.
+        let keys: Vec<(String, String, bool)> = Bind::ALL
+            .iter()
+            .map(|(bind, _)| {
+                let sc = self.keybinds.shortcut(*bind);
+                (bind.id().to_owned(), sc.key.name().to_owned(), sc.shift)
+            })
+            .collect();
         eframe::set_value(storage, KEYBINDS_KEY, &keys);
     }
 
@@ -1752,20 +2154,44 @@ impl eframe::App for App {
         let ready = self.decoder.as_ref().is_some_and(|d| d.ready);
         let now = ctx.input(|i| i.time);
 
-        // Clip shortcuts, unless a text field has focus or Settings is capturing
-        // a key for rebinding. Set start/end mirror the buttons' position guards.
+        // Clip + playback shortcuts, unless a text field has focus or Settings is
+        // capturing a key. Set start/end mirror the buttons' position guards.
         if ready && self.rebinding.is_none() && !ctx.wants_keyboard_input() {
             let kb = self.keybinds;
             let cur = self.decoder.as_ref().map(|d| d.current_secs);
-            if ctx.input(|i| i.key_pressed(kb.play_pause)) {
+            if ctx.input(|i| shortcut_pressed(i, kb.play_pause)) {
                 self.toggle_play(now);
             }
+            if ctx.input(|i| shortcut_pressed(i, kb.play_pause_clip)) {
+                self.toggle_play_clip(now);
+            }
             if let Some(cur) = cur {
-                if ctx.input(|i| i.key_pressed(kb.set_start)) && cur <= self.out_secs {
+                if ctx.input(|i| shortcut_pressed(i, kb.set_start)) && cur <= self.out_secs {
                     self.in_secs = cur;
                 }
-                if ctx.input(|i| i.key_pressed(kb.set_end)) && cur >= self.in_secs {
+                if ctx.input(|i| shortcut_pressed(i, kb.set_end)) && cur >= self.in_secs {
                     self.out_secs = cur;
+                }
+            }
+
+            // Nav keys repeat while held, on a timer so they don't fire too fast:
+            // fire on press, pause `NAV_REPEAT_DELAY`, then every `..._INTERVAL`.
+            let nav = [kb.skip_back, kb.skip_forward, kb.step_back, kb.step_forward];
+            for (idx, sc) in nav.into_iter().enumerate() {
+                if ctx.input(|i| shortcut_down(i, sc)) {
+                    if now >= self.nav_repeat_at[idx] {
+                        let first = self.nav_repeat_at[idx] == 0.0;
+                        let wait = if first { NAV_REPEAT_DELAY } else { NAV_REPEAT_INTERVAL };
+                        self.nav_repeat_at[idx] = now + wait;
+                        match idx {
+                            0 => self.skip_secs(-SKIP_SECS),
+                            1 => self.skip_secs(SKIP_SECS),
+                            2 => self.step_frame(false),
+                            _ => self.step_frame(true),
+                        }
+                    }
+                } else {
+                    self.nav_repeat_at[idx] = 0.0;
                 }
             }
         }
@@ -1829,19 +2255,34 @@ impl eframe::App for App {
             // Editable title (seeds the export filename).
             if self.video_path.is_some() {
                 let mut title = self.video_title.clone().unwrap_or_default();
+                let mut pick_output = false;
                 ui.horizontal(|ui| {
                     ui.label("Title:");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut title)
-                                .desired_width(f32::INFINITY)
-                                .margin(INPUT_MARGIN),
-                        )
-                        .changed()
-                    {
-                        self.video_title = Some(title);
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("Choose folder…")
+                            .on_hover_text("Folder the save dialog opens in (set a default in Settings)")
+                            .clicked()
+                        {
+                            pick_output = true;
+                        }
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut title)
+                                    .desired_width(f32::INFINITY)
+                                    .margin(INPUT_MARGIN),
+                            )
+                            .changed()
+                        {
+                            self.video_title = Some(title);
+                        }
+                    });
                 });
+                if pick_output {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        self.output_dir = Some(folder);
+                    }
+                }
                 ui.add_space(4.0);
             }
 
