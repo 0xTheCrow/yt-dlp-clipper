@@ -415,7 +415,7 @@ fn main() -> eframe::Result<()> {
     let cli_path = std::env::args().nth(1);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("yt-dlp-clipper")
+            .with_title("Cooper Clipper")
             .with_inner_size([960.0, 720.0])
             .with_min_inner_size([800.0, 480.0]),
         ..Default::default()

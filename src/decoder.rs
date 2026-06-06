@@ -116,7 +116,7 @@ impl Decoder {
             return None;
         }
         self.current_pts = frame.pts().unwrap_or(self.current_pts);
-        Some(self.to_image(&mut frame))
+        self.to_image(&mut frame)
     }
 
     /// Step `n` frames from the current position: forward (`n > 0`) decodes
@@ -169,7 +169,7 @@ impl Decoder {
             last_pts = pts;
             if pts >= target_pts {
                 self.current_pts = pts;
-                return Some(self.to_image(&mut frame));
+                return self.to_image(&mut frame);
             }
         }
         None
@@ -200,9 +200,14 @@ impl Decoder {
         }
     }
 
-    fn to_image(&mut self, frame: &mut Video) -> egui::ColorImage {
+    fn to_image(&mut self, frame: &mut Video) -> Option<egui::ColorImage> {
         let mut rgba = Video::empty();
-        self.scaler.run(frame, &mut rgba).expect("scaler failed");
+        if let Err(e) = self.scaler.run(frame, &mut rgba) {
+            // Don't panic the worker thread: a dead worker silently stalls the UI
+            // (no frames, no error). Drop this frame instead.
+            eprintln!("scaler failed: {e}");
+            return None;
+        }
 
         let w = self.width as usize;
         let h = self.height as usize;
@@ -222,9 +227,9 @@ impl Decoder {
                 ));
             }
         }
-        egui::ColorImage {
+        Some(egui::ColorImage {
             size: [w, h],
             pixels,
-        }
+        })
     }
 }

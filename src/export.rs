@@ -610,10 +610,9 @@ struct VideoReenc {
 }
 
 impl VideoReenc {
-    /// Decode `packet`, encode the frames inside the window. Returns `true` once
-    /// the window end is reached and the caller should stop reading.
-    fn process(&mut self, packet: &ffmpeg::Packet, octx: &mut ffmpeg::format::context::Output) -> Result<bool> {
-        self.decoder.send_packet(packet)?;
+    /// Pull decoded frames, scale + encode the ones inside the window. Returns
+    /// `true` once the window end is reached and the caller should stop reading.
+    fn drain_decoder(&mut self, octx: &mut ffmpeg::format::context::Output) -> Result<bool> {
         let mut frame = Video::empty();
         while self.decoder.receive_frame(&mut frame).is_ok() {
             let pts = frame.pts().unwrap_or(0);
@@ -635,7 +634,18 @@ impl VideoReenc {
         Ok(false)
     }
 
+    /// Decode `packet`, encode the frames inside the window. Returns `true` once
+    /// the window end is reached and the caller should stop reading.
+    fn process(&mut self, packet: &ffmpeg::Packet, octx: &mut ffmpeg::format::context::Output) -> Result<bool> {
+        self.decoder.send_packet(packet)?;
+        self.drain_decoder(octx)
+    }
+
     fn flush(&mut self, octx: &mut ffmpeg::format::context::Output) -> Result<()> {
+        // Drain the decoder first: its reorder delay (B-frames) holds the last
+        // frames, which a Full re-encode would otherwise truncate at EOF.
+        self.decoder.send_eof()?;
+        self.drain_decoder(octx)?;
         self.encoder.send_eof()?;
         write_encoded(&mut self.encoder, octx, self.out_index, self.enc_tb)?;
         Ok(())
@@ -774,10 +784,12 @@ fn transcode(spec: &ExportSpec, container: Container, clip: bool, cancel: &Atomi
 
     // ---- video pipe: re-encode (clip, or codec the container can't hold) or copy ----
     let mut v_in_index = usize::MAX;
+    let mut v_in_tb = ffmpeg::Rational(1, 1);
     let mut v_copy: Option<(ffmpeg::Rational, usize)> = None;
     let mut v_reenc: Option<VideoReenc> = None;
     if let Some((index, in_tb, fps, codec, params)) = video_meta {
         v_in_index = index;
+        v_in_tb = in_tb;
         let src_h = unsafe { (*params.as_ptr()).height } as u32;
         let downscale = matches!(spec.scale_height, Some(th) if src_h > th);
         if clip || downscale || !video_fits(container, codec) {
@@ -856,6 +868,10 @@ fn transcode(spec: &ExportSpec, container: Container, clip: bool, cancel: &Atomi
     // reading audio past the video's end (until this PTS) instead of stopping the
     // moment video finishes, which would clip the audio tail short.
     let a_end_ts = (spec.end_secs / f64::from(a_in_tb)).round() as i64;
+    // Same backstop for video: if frame PTS are missing so `process` never
+    // reports the window end, the packet timeline still bounds the read instead
+    // of decoding every remaining packet to EOF.
+    let v_end_ts = (spec.end_secs / f64::from(v_in_tb)).round() as i64;
     let mut v_done = v_reenc.is_none();
     let mut a_done = a_reenc.is_none();
 
@@ -866,6 +882,9 @@ fn transcode(spec: &ExportSpec, container: Container, clip: bool, cancel: &Atomi
         if idx == v_in_index {
             if let Some(vr) = v_reenc.as_mut() {
                 if !v_done && vr.process(&packet, &mut octx)? {
+                    v_done = true;
+                }
+                if clip && packet.pts().is_some_and(|p| p > v_end_ts) {
                     v_done = true;
                 }
             } else if let Some((in_tb, out_index)) = v_copy {

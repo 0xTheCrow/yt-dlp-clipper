@@ -19,6 +19,9 @@ const BUFFER_SECS: usize = 1;
 pub struct AudioPlayer {
     _stream: cpal::Stream,
     stop: Arc<AtomicBool>,
+    /// The decode worker, joined on drop so the old pipeline is fully torn down
+    /// before a new file starts (otherwise two can briefly run at once).
+    worker: Option<std::thread::JoinHandle<()>>,
     /// Interleaved f32 samples that have been sent to the device.
     consumed: Arc<AtomicU64>,
     /// Output gain in `0.0..=1.0`, stored as f32 bits for lock-free updates.
@@ -31,6 +34,9 @@ pub struct AudioPlayer {
 impl Drop for AudioPlayer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -84,7 +90,7 @@ impl AudioPlayer {
         let path = path.to_owned();
         let decode_ring = ring.clone();
         let decode_stop = stop.clone();
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             if let Err(e) = decode_audio(
                 &path,
                 start_secs,
@@ -100,6 +106,7 @@ impl AudioPlayer {
         Ok(Self {
             _stream: stream,
             stop,
+            worker: Some(worker),
             consumed,
             volume,
             start_secs,
@@ -163,10 +170,17 @@ fn decode_audio(
     // preview starts on the same sample the export does, keeping audio/video and
     // the clock honest. Set on the first decoded frame, whose PTS fixes the lead.
     let mut skip_frames: Option<i64> = None;
+    // Compute the leading `skip` (output frames between the seek landing and the
+    // in-point) from the first decoded frame's PTS.
+    let lead_skip = |frame: &ffmpeg::frame::Audio| {
+        let frame_secs = frame.pts().unwrap_or(0) as f64 * time_base;
+        ((start_secs - frame_secs).max(0.0) * out_rate as f64).round() as i64
+    };
+
     let mut packet = ffmpeg::Packet::empty();
     loop {
         if stop.load(Ordering::Relaxed) {
-            break;
+            return Ok(());
         }
         if ring.lock().unwrap().len() > max_buffered {
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -180,36 +194,64 @@ fn decode_audio(
                 if decoder.send_packet(&packet).is_err() {
                     continue;
                 }
-                let mut frame = ffmpeg::frame::Audio::empty();
-                while decoder.receive_frame(&mut frame).is_ok() {
-                    let skip = skip_frames.get_or_insert_with(|| {
-                        let frame_secs = frame.pts().unwrap_or(0) as f64 * time_base;
-                        ((start_secs - frame_secs).max(0.0) * out_rate as f64).round() as i64
-                    });
-                    let mut out = ffmpeg::frame::Audio::empty();
-                    if resampler.run(&frame, &mut out).is_err() {
-                        continue;
-                    }
-                    let count = out.samples() * out_channels;
-                    let bytes = out.data(0);
-                    if count == 0 || count * std::mem::size_of::<f32>() > bytes.len() {
-                        continue;
-                    }
-                    // Resampled to packed f32, so plane 0 is the interleaved data.
-                    let samples =
-                        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, count) };
-                    let offset = if *skip > 0 {
-                        let drop_frames = (*skip).min(out.samples() as i64);
-                        *skip -= drop_frames;
-                        drop_frames as usize * out_channels
-                    } else {
-                        0
-                    };
-                    ring.lock().unwrap().extend(samples[offset..].iter().copied());
-                }
             }
-            Err(_) => break, // end of stream
+            Err(_) => break, // end of stream — drain the held tail below
+        }
+        let mut frame = ffmpeg::frame::Audio::empty();
+        while decoder.receive_frame(&mut frame).is_ok() {
+            let skip = skip_frames.get_or_insert_with(|| lead_skip(&frame));
+            let mut out = ffmpeg::frame::Audio::empty();
+            if resampler.run(&frame, &mut out).is_ok() {
+                push_resampled(&out, out_channels, skip, &ring);
+            }
+        }
+    }
+
+    // End of stream: drain the decoder's reorder delay, then the resampler's
+    // rate-conversion delay, so the last few ms of audio aren't dropped.
+    let _ = decoder.send_eof();
+    let mut frame = ffmpeg::frame::Audio::empty();
+    while decoder.receive_frame(&mut frame).is_ok() {
+        let skip = skip_frames.get_or_insert_with(|| lead_skip(&frame));
+        let mut out = ffmpeg::frame::Audio::empty();
+        if resampler.run(&frame, &mut out).is_ok() {
+            push_resampled(&out, out_channels, skip, &ring);
+        }
+    }
+    if let Some(skip) = skip_frames.as_mut() {
+        loop {
+            let mut out = ffmpeg::frame::Audio::empty();
+            match resampler.flush(&mut out) {
+                Ok(_) if out.samples() > 0 => push_resampled(&out, out_channels, skip, &ring),
+                _ => break,
+            }
         }
     }
     Ok(())
+}
+
+/// Push one resampled (packed f32) frame into the ring, honoring the leading
+/// `skip` (in output frames) that aligns the preview's first sample with the
+/// in-point.
+fn push_resampled(
+    out: &ffmpeg::frame::Audio,
+    out_channels: usize,
+    skip: &mut i64,
+    ring: &Mutex<VecDeque<f32>>,
+) {
+    let count = out.samples() * out_channels;
+    let bytes = out.data(0);
+    if count == 0 || count * std::mem::size_of::<f32>() > bytes.len() {
+        return;
+    }
+    // Resampled to packed f32, so plane 0 is the interleaved data.
+    let samples = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, count) };
+    let offset = if *skip > 0 {
+        let drop_frames = (*skip).min(out.samples() as i64);
+        *skip -= drop_frames;
+        drop_frames as usize * out_channels
+    } else {
+        0
+    };
+    ring.lock().unwrap().extend(samples[offset..].iter().copied());
 }

@@ -211,7 +211,9 @@ pub fn update() -> Result<String> {
 /// Fetch metadata (`yt-dlp -J <url>`) without downloading anything.
 pub fn fetch_info(url: &str) -> Result<VideoInfo> {
     let output = Command::new(binary())
-        .args(["-J", "--no-playlist", url])
+        // `--` ends option parsing so a URL starting with `-` can't be taken as
+        // a yt-dlp flag (e.g. `--exec`, `--config-location`).
+        .args(["-J", "--no-playlist", "--", url])
         .output()
         .context("failed to run yt-dlp — is it installed and on PATH?")?;
 
@@ -267,6 +269,9 @@ pub fn download(
         progress_template,
         "--print",
         "after_move:OUTPUT %(filepath)s",
+        // `--` ends option parsing so a URL starting with `-` can't be taken as a
+        // yt-dlp flag (e.g. `--exec`, `--config-location`, `-o`).
+        "--",
         url,
     ]);
 

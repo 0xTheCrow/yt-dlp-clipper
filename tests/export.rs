@@ -1,6 +1,45 @@
 mod common;
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
 use yank::export::{export, AudioFormat, ExportSpec, Mode};
+
+/// H.264 video + Opus audio in MKV — mirrors a YouTube download whose Opus
+/// audio MP4 can't hold via stream copy.
+fn h264_with_opus() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        common::generate(
+            "fixture_h264_opus.mkv",
+            &["-c:v", "libx264", "-c:a", "libopus", "-shortest"],
+        )
+    })
+    .clone()
+}
+
+/// Read a single ffprobe field (one value per line).
+fn ffprobe(path: &Path, entries: &str) -> String {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", entries])
+        .args(["-of", "default=noprint_wrappers=1:nokey=1"])
+        .arg(path)
+        .output()
+        .expect("ffprobe must be installed to run these tests");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn probe_duration(path: &Path) -> f64 {
+    ffprobe(path, "format=duration").trim().parse().unwrap_or(0.0)
+}
+
+fn probe_stream_types(path: &Path) -> Vec<String> {
+    ffprobe(path, "stream=codec_type")
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
 
 fn run(mode: Mode, out_name: &str, start: f64, end: f64) -> std::path::PathBuf {
     run_from(common::h264_with_audio(), mode, out_name, start, end)
@@ -28,7 +67,7 @@ fn run_from(
 }
 
 fn codec_of(path: &std::path::Path, kind: &str) -> String {
-    let names = common::ffprobe(path, "stream=codec_type,codec_name");
+    let names = ffprobe(path, "stream=codec_type,codec_name");
     // ffprobe prints codec_type then codec_name per stream, one value per line.
     let lines: Vec<&str> = names.lines().map(|s| s.trim()).collect();
     lines
@@ -41,13 +80,13 @@ fn codec_of(path: &std::path::Path, kind: &str) -> String {
 #[test]
 fn full_keeps_video_and_audio_for_whole_file() {
     let out = run(Mode::Full, "export_full.mp4", 0.0, common::DURATION_SECS);
-    let types = common::probe_stream_types(&out);
+    let types = probe_stream_types(&out);
     assert!(types.contains(&"video".to_string()), "missing video: {types:?}");
     assert!(types.contains(&"audio".to_string()), "missing audio: {types:?}");
     assert!(
-        (common::probe_duration(&out) - common::DURATION_SECS).abs() < 0.2,
+        (probe_duration(&out) - common::DURATION_SECS).abs() < 0.2,
         "duration {} not near {}",
-        common::probe_duration(&out),
+        probe_duration(&out),
         common::DURATION_SECS
     );
 }
@@ -55,30 +94,30 @@ fn full_keeps_video_and_audio_for_whole_file() {
 #[test]
 fn clip_trims_to_window_and_keeps_audio() {
     let out = run(Mode::Clip, "export_clip.mp4", 1.0, 3.0);
-    let types = common::probe_stream_types(&out);
+    let types = probe_stream_types(&out);
     assert!(types.contains(&"video".to_string()), "missing video: {types:?}");
     assert!(types.contains(&"audio".to_string()), "missing audio: {types:?}");
-    let dur = common::probe_duration(&out);
+    let dur = probe_duration(&out);
     assert!((dur - 2.0).abs() < 0.2, "clip duration {dur} not near 2.0");
 }
 
 #[test]
 fn audio_only_copy_has_no_video_stream() {
     let out = run(Mode::AudioOnly(AudioFormat::Original), "export_audio.m4a", 1.0, 3.0);
-    let types = common::probe_stream_types(&out);
+    let types = probe_stream_types(&out);
     assert_eq!(types, vec!["audio".to_string()], "expected audio only: {types:?}");
-    let dur = common::probe_duration(&out);
+    let dur = probe_duration(&out);
     assert!((dur - 2.0).abs() < 0.2, "audio duration {dur} not near 2.0");
 }
 
 #[test]
 fn audio_only_mp3_reencodes_to_window() {
     let out = run(Mode::AudioOnly(AudioFormat::Mp3), "export_audio.mp3", 1.0, 3.0);
-    let types = common::probe_stream_types(&out);
+    let types = probe_stream_types(&out);
     assert_eq!(types, vec!["audio".to_string()], "expected audio only: {types:?}");
-    let codec = common::ffprobe(&out, "stream=codec_name");
+    let codec = ffprobe(&out, "stream=codec_name");
     assert!(codec.trim().starts_with("mp3"), "expected mp3, got {codec:?}");
-    let dur = common::probe_duration(&out);
+    let dur = probe_duration(&out);
     assert!((dur - 2.0).abs() < 0.3, "audio duration {dur} not near 2.0");
 }
 
@@ -102,24 +141,24 @@ fn clip_transcodes_into_webm() {
     let out = run(Mode::Clip, "export_clip.webm", 1.0, 3.0);
     assert_eq!(codec_of(&out, "video"), "vp9", "clip video should be vp9");
     assert_eq!(codec_of(&out, "audio"), "opus", "clip audio should be opus");
-    let dur = common::probe_duration(&out);
+    let dur = probe_duration(&out);
     assert!((dur - 2.0).abs() < 0.3, "clip duration {dur} not near 2.0");
 }
 
 #[test]
 fn clip_transcodes_opus_audio_into_mp4() {
     // MP4 can't hold Opus via copy, so the clip's audio must become AAC.
-    let out = run_from(common::h264_with_opus(), Mode::Clip, "export_opus_clip.mp4", 1.0, 3.0);
+    let out = run_from(h264_with_opus(), Mode::Clip, "export_opus_clip.mp4", 1.0, 3.0);
     assert_eq!(codec_of(&out, "video"), "h264", "clip video should be h264");
     assert_eq!(codec_of(&out, "audio"), "aac", "opus should be transcoded to aac");
-    let dur = common::probe_duration(&out);
+    let dur = probe_duration(&out);
     assert!((dur - 2.0).abs() < 0.3, "clip duration {dur} not near 2.0");
 }
 
 /// Duration of the first audio stream, in seconds (sample-accurate trimming
 /// makes this match the requested window, unlike packet-granular trimming).
 fn audio_stream_duration(path: &std::path::Path) -> f64 {
-    common::ffprobe(path, "stream=codec_type,duration")
+    ffprobe(path, "stream=codec_type,duration")
         .lines()
         .map(str::trim)
         .collect::<Vec<_>>()
@@ -159,7 +198,7 @@ fn run_scaled(mode: Mode, out_name: &str, height: u32) -> (u32, u32) {
         scale_height: Some(height),
     })
     .expect("export should succeed");
-    let dims = common::ffprobe(&out, "stream=width,height");
+    let dims = ffprobe(&out, "stream=width,height");
     let nums: Vec<u32> = dims.lines().filter_map(|l| l.trim().parse().ok()).collect();
     (nums[0], nums[1])
 }
