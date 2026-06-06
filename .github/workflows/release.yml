@@ -1,25 +1,31 @@
 name: Release
 
-# Build the Linux AppImage and the Windows bundle and attach them to a GitHub
-# release whenever a v* tag is pushed:
+# Build all three desktop bundles and attach them to a GitHub release when a v*
+# tag is pushed:
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# Both artifacts build on Linux — the Windows bundle cross-compiles via cargo-xwin
-# (scripts/make-windows.sh) — so one Ubuntu job covers both targets. macOS would
-# need its own runner + packaging script (not built yet). Pinned to ubuntu-22.04
-# for an older glibc, so the AppImage runs on a wider range of desktops.
+# Linux (AppImage) + Windows (cross-compiled via cargo-xwin) build on one Ubuntu
+# job; macOS (.dmg) builds natively on macOS runners — one per arch, since the
+# app links FFmpeg/CoreAudio at build time and can't be cross-compiled there.
+# macOS CI is free because this repo is public (standard runners, no minute cap).
+#
+# Each build job uploads its files as workflow artifacts; a final `release` job
+# collects them and publishes once (so the jobs don't race on the same release).
+# workflow_dispatch lets you build on demand without tagging — grab the bundles
+# from the run's Artifacts instead of a release.
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write          # GITHUB_TOKEN needs this to create the release
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
+  linux:
+    runs-on: ubuntu-22.04  # older glibc => the AppImage runs on a wider range of desktops
     steps:
       - uses: actions/checkout@v4
 
@@ -46,10 +52,50 @@ jobs:
       - name: Build Windows bundle
         run: ./scripts/make-windows.sh
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-windows
+          path: |
+            yt-dlp-clipper-*-x86_64.AppImage
+            yt-dlp-clipper-*-win64.zip
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14   # Apple Silicon (arm64)
+          - runner: macos-13   # Intel (x86_64)
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        # ffmpeg@6 matches the ffmpeg-the-third 1.2 pin (brew's default ffmpeg is 7.x).
+        run: brew install ffmpeg@6 pkg-config dylibbundler
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build macOS .app + .dmg
+        run: ./scripts/make-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.runner }}
+          path: yt-dlp-clipper-*-macos-*.dmg
+
+  release:
+    needs: [linux, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            yt-dlp-clipper-*-x86_64.AppImage
-            yt-dlp-clipper-*-win64.zip
+          files: dist/**/*
