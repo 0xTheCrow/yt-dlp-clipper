@@ -62,6 +62,12 @@ sudo apt-get install \
   libavdevice-dev libswscale-dev libswresample-dev \
   clang pkg-config libasound2-dev
 ```
+You'll also want the `yt-dlp` and `ffmpeg` **binaries** on your `PATH` to run it.
+
+```sh
+sudo apt-get install ffmpeg
+# yt-dlp: see https://github.com/yt-dlp/yt-dlp#installation
+```
 
 On Arch Linux (the `ffmpeg`, `alsa-lib`, and `yt-dlp` packages also provide the
 runtime binaries, so this one command covers both build and run):
@@ -74,14 +80,6 @@ sudo pacman -S --needed ffmpeg clang pkgconf alsa-lib yt-dlp rust
 > build won't link (see the FFmpeg-version note above). In that case install a
 > 6.x `ffmpeg` (e.g. a compat package from the AUR) for building. Using `rustup`
 > instead of the `rust` package is fine too.
-
-You'll also want the `yt-dlp` and `ffmpeg` **binaries** on your `PATH` to run it.
-On Debian/Ubuntu:
-
-```sh
-sudo apt-get install ffmpeg
-# yt-dlp: see https://github.com/yt-dlp/yt-dlp#installation
-```
 
 ## Build & run
 
