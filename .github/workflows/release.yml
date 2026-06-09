@@ -5,9 +5,10 @@ name: Release
 #   git tag v0.1.0 && git push origin v0.1.0
 #
 # Linux (AppImage) + Windows (cross-compiled via cargo-xwin) build on one Ubuntu
-# job; macOS (.dmg) builds natively on macOS runners — one per arch, since the
-# app links FFmpeg/CoreAudio at build time and can't be cross-compiled there.
-# macOS CI is free because this repo is public (standard runners, no minute cap).
+# job; macOS (.dmg) builds natively on an arm64 runner, since the app links
+# FFmpeg/CoreAudio at build time and can't be cross-compiled there. Intel macOS
+# is no longer built (the macos-13 image retired Dec 2025; Apple has dropped
+# x86_64). macOS CI is free because this repo is public (standard runners).
 #
 # Each build job uploads its files as workflow artifacts; a final `release` job
 # collects them and publishes once (so the jobs don't race on the same release).
@@ -24,7 +25,7 @@ permissions:
   contents: write          # GITHUB_TOKEN needs this to create the release
 
 jobs:
-  linux:
+  linux-windows:           # one Ubuntu job builds BOTH the Linux AppImage and the cross-compiled Windows bundle
     runs-on: ubuntu-22.04  # older glibc => the AppImage runs on a wider range of desktops
     steps:
       - uses: actions/checkout@v4
@@ -60,13 +61,7 @@ jobs:
             yt-dlp-clipper-*-win64.zip
 
   macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14   # Apple Silicon (arm64)
-          - runner: macos-13   # Intel (x86_64)
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-14   # Apple Silicon (arm64) only; Intel macOS dropped (macos-13 image retired Dec 2025)
     steps:
       - uses: actions/checkout@v4
 
@@ -81,11 +76,11 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.runner }}
+          name: macos
           path: yt-dlp-clipper-*-macos-*.dmg
 
   release:
-    needs: [linux, macos]
+    needs: [linux-windows, macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
