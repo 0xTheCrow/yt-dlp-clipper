@@ -91,8 +91,6 @@ cargo build --release  # optimized build
 cargo test             # unit + integration tests (need ffmpeg + ffprobe)
 ```
 
-The crate is named `yank`; the build produces a `yank` binary.
-
 ## Packaging (distributable builds)
 
 Scripts in `scripts/` produce self-contained bundles that ship `yt-dlp` and
