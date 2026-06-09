@@ -4958,21 +4958,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
-name = "yank"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cpal",
- "eframe",
- "egui",
- "egui_extras",
- "ffmpeg-the-third",
- "rfd",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "yoke"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4993,6 +4978,21 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "synstructure",
+]
+
+[[package]]
+name = "yt-dlp-clipper"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cpal",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "ffmpeg-the-third",
+ "rfd",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

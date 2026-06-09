@@ -41,7 +41,7 @@ chmod +x "$BUILD/linuxdeploy.AppImage" "$BUILD/yt-dlp" "$BUILD/ffmpeg"
 echo "==> Assembling AppDir (app + yt-dlp + ffmpeg next to the exe)"
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin"
-cp "$ROOT/target/release/yank" "$APPDIR/usr/bin/yt-dlp-clipper"
+cp "$ROOT/target/release/yt-dlp-clipper" "$APPDIR/usr/bin/yt-dlp-clipper"
 cp "$BUILD/yt-dlp"             "$APPDIR/usr/bin/yt-dlp"
 cp "$BUILD/ffmpeg"            "$APPDIR/usr/bin/ffmpeg"
 chmod +x "$APPDIR/usr/bin/"*

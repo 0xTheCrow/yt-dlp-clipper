@@ -1,5 +1,5 @@
 [package]
-name = "yank"
+name = "yt-dlp-clipper"
 version = "0.1.0"
 edition = "2021"
 description = "Pull videos with yt-dlp and trim them frame-accurately"

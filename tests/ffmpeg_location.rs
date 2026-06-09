@@ -8,11 +8,11 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use yank::ytdlp;
+use yt_dlp_clipper::ytdlp;
 
 #[test]
 fn download_passes_ffmpeg_location() {
-    let dir = std::env::temp_dir().join("yank_ffmpeg_loc_test");
+    let dir = std::env::temp_dir().join("yt_dlp_clipper_ffmpeg_loc_test");
     let _ = fs::create_dir_all(&dir);
     let argv_log = dir.join("argv.txt");
     let _ = fs::remove_file(&argv_log);
@@ -27,7 +27,7 @@ fn download_passes_ffmpeg_location() {
     .unwrap();
     fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let ffmpeg = PathBuf::from("/opt/yank/ffmpeg-sentinel");
+    let ffmpeg = PathBuf::from("/opt/yt-dlp-clipper/ffmpeg-sentinel");
     ytdlp::set_binary(shim);
     ytdlp::set_ffmpeg(ffmpeg.clone());
 

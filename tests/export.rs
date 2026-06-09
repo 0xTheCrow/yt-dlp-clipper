@@ -3,7 +3,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use yank::export::{export, AudioFormat, ExportSpec, Mode};
+use yt_dlp_clipper::export::{export, AudioFormat, ExportSpec, Mode};
 
 /// H.264 video + Opus audio in MKV — mirrors a YouTube download whose Opus
 /// audio MP4 can't hold via stream copy.

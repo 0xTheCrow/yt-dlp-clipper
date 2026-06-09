@@ -2,7 +2,7 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use yank::decoder::Decoder;
+use yt_dlp_clipper::decoder::Decoder;
 
 const FRAME_SECS: f64 = 1.0 / common::FPS;
 const WIDTH: u32 = 320;

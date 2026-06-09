@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
-use yank::audio::AudioPlayer;
-use yank::decoder::Decoder;
-use yank::export::{self, ExportSpec, Mode};
-use yank::ytdlp;
+use yt_dlp_clipper::audio::AudioPlayer;
+use yt_dlp_clipper::decoder::Decoder;
+use yt_dlp_clipper::export::{self, ExportSpec, Mode};
+use yt_dlp_clipper::ytdlp;
 
 /// On-disk identifier for the app-data dir (settings + download cache). Kept
 /// generic and stable so renaming the app doesn't orphan persisted state.

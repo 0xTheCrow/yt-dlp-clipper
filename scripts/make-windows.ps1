@@ -73,7 +73,7 @@ if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 Write-Host '==> Staging bundle'
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Force -Path (Join-Path $dist 'bin') | Out-Null
-Copy-Item 'target\release\yank.exe' (Join-Path $dist 'yt-dlp-clipper.exe')
+Copy-Item 'target\release\yt-dlp-clipper.exe' (Join-Path $dist 'yt-dlp-clipper.exe')
 Copy-Item $ytdlpExe                 (Join-Path $dist 'bin\yt-dlp.exe')
 Copy-Item (Join-Path $ffmpegDir 'bin\ffmpeg.exe') (Join-Path $dist 'bin\ffmpeg.exe')
 # FFmpeg runtime DLLs the app links against (Windows loads these from the exe dir).

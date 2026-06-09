@@ -72,7 +72,7 @@ chmod +x "$BUILD/yt-dlp" "$BUILD/ffmpeg"
 echo "==> Assembling $APP_NAME.app"
 rm -rf "$APP"
 mkdir -p "$MACOS_DIR" "$RES_DIR"
-cp "$ROOT/target/release/yank" "$MACOS_DIR/$APP_NAME"
+cp "$ROOT/target/release/yt-dlp-clipper" "$MACOS_DIR/$APP_NAME"
 cp "$BUILD/yt-dlp"             "$MACOS_DIR/yt-dlp"
 cp "$BUILD/ffmpeg"            "$MACOS_DIR/ffmpeg"
 chmod +x "$MACOS_DIR/"*

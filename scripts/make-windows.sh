@@ -2,7 +2,7 @@
 # Cross-compile a single self-contained Windows folder (zipped) for yt-dlp-clipper,
 # FROM LINUX. The Windows counterpart that builds natively is scripts/make-windows.ps1.
 #
-# Only yank.exe needs a Windows toolchain; yt-dlp.exe and ffmpeg.exe are pure runtime
+# Only yt-dlp-clipper.exe needs a Windows toolchain; yt-dlp.exe and ffmpeg.exe are pure runtime
 # binaries we just download and stage next to it. We target x86_64-pc-windows-msvc via
 # cargo-xwin (it fetches the MSVC CRT + Windows SDK into a user cache — no Visual Studio,
 # no Wine). The app links FFmpeg's libav* at build time, so we point FFMPEG_DIR at the
@@ -57,7 +57,7 @@ FFMPEG_DIR="$BUILD/$FFMPEG_NAME"
 YTDLP_EXE="$BUILD/yt-dlp.exe"
 [ -f "$YTDLP_EXE" ] || { echo "==> Downloading yt-dlp.exe"; wget -qO "$YTDLP_EXE" "$YTDLP_URL"; }
 
-# --- build (cross-compile yank.exe) -------------------------------------------
+# --- build (cross-compile yt-dlp-clipper.exe) -------------------------------------------
 # ffmpeg-sys finds the import libs + headers via FFMPEG_DIR. bindgen runs libclang
 # directly and won't otherwise know it's targeting Windows, so it needs the target
 # triple plus the MSVC/SDK headers cargo-xwin splats into the cache (layout below;
@@ -83,7 +83,7 @@ cargo xwin build --release --target "$TARGET"
 # stay at the root because Windows loads them from the exe's own dir at startup.
 echo "==> Staging bundle"
 rm -rf "$DIST"; mkdir -p "$DIST/bin"
-cp "target/$TARGET/release/yank.exe" "$DIST/yt-dlp-clipper.exe"
+cp "target/$TARGET/release/yt-dlp-clipper.exe" "$DIST/yt-dlp-clipper.exe"
 cp "$YTDLP_EXE"                      "$DIST/bin/yt-dlp.exe"
 cp "$FFMPEG_DIR/bin/ffmpeg.exe"      "$DIST/bin/ffmpeg.exe"
 # FFmpeg runtime DLLs the app links against (Windows loads these from the exe dir).
