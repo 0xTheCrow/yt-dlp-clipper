@@ -18,6 +18,7 @@ const DELETE_ON_EXIT_KEY: &str = "delete_cache_on_exit";
 const VOLUME_KEY: &str = "volume";
 const KEYBINDS_KEY: &str = "keybinds";
 const OUTPUT_DIR_KEY: &str = "output_dir";
+const OPEN_DIR_ON_SAVE_KEY: &str = "open_dir_on_save";
 const THEME_KEY: &str = "theme";
 
 /// Standard heights offered when downscaling a saved video, tallest first. Only
@@ -64,6 +65,22 @@ fn icon_button(ui: &mut egui::Ui, icon: egui::ImageSource<'_>, text: &str) -> eg
     let size = ui.text_style_height(&egui::TextStyle::Button);
     let image = egui::Image::new(icon).fit_to_exact_size(egui::Vec2::splat(size));
     ui.add(egui::Button::image_and_text(image, text))
+}
+
+/// Reveal a saved file in the system file manager, selecting it when the
+/// platform supports it and otherwise opening its containing folder.
+fn reveal_in_file_manager(path: &Path) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let dir = path.parent().unwrap_or(path);
+        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    }
 }
 
 /// Height of a standard button (font height + vertical padding). Used to size
@@ -308,6 +325,21 @@ fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
 }
 
+/// Subfolder beside the executable where the Windows bundle stages helper
+/// binaries, keeping the app exe alone at the bundle root so it's the only
+/// thing a user can click to launch.
+const BUNDLED_BIN_SUBDIR: &str = "bin";
+
+/// Locate a bundled tool binary: the `bin/` subfolder beside the exe first
+/// (the packaged layout), then directly beside the exe (dev `target/` builds
+/// and the AppImage/macOS bundles, which stage tools next to the app).
+fn bundled_binary(name: &str) -> Option<PathBuf> {
+    let dir = exe_dir()?;
+    [dir.join(BUNDLED_BIN_SUBDIR).join(name), dir.join(name)]
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
 /// First directory on `PATH` that contains `name`. Returned as a full path so we
 /// invoke it directly rather than letting the OS re-resolve a bare name.
 fn find_in_path(name: &str) -> Option<PathBuf> {
@@ -339,7 +371,7 @@ fn set_owner_only(_path: &Path, _mode: u32) {}
 
 /// Resolve yt-dlp to an absolute path, seeding a writable managed copy so
 /// `yt-dlp -U` can update it in place even when the app is installed read-only.
-/// Order: managed copy → bundled (next to exe) → PATH.
+/// Order: managed copy → bundled (`bin/` or next to exe) → PATH.
 fn resolve_ytdlp() -> Option<PathBuf> {
     let managed = managed_bin_dir().map(|d| d.join(YTDLP_EXE));
     if let Some(m) = &managed {
@@ -347,10 +379,7 @@ fn resolve_ytdlp() -> Option<PathBuf> {
             return Some(m.clone());
         }
     }
-    let source = exe_dir()
-        .map(|d| d.join(YTDLP_EXE))
-        .filter(|p| p.is_file())
-        .or_else(|| find_in_path(YTDLP_EXE))?;
+    let source = bundled_binary(YTDLP_EXE).or_else(|| find_in_path(YTDLP_EXE))?;
     // Seed the managed copy so updates work; if we can't, run the source binary
     // directly — still by absolute path, never a bare name.
     match &managed {
@@ -364,12 +393,9 @@ fn resolve_ytdlp() -> Option<PathBuf> {
 
 /// Resolve ffmpeg to an absolute path for `--ffmpeg-location`. No managed copy:
 /// ffmpeg never self-updates, so it needn't live in a writable dir.
-/// Order: bundled (next to exe) → PATH.
+/// Order: bundled (`bin/` or next to exe) → PATH.
 fn resolve_ffmpeg() -> Option<PathBuf> {
-    exe_dir()
-        .map(|d| d.join(FFMPEG_EXE))
-        .filter(|p| p.is_file())
-        .or_else(|| find_in_path(FFMPEG_EXE))
+    bundled_binary(FFMPEG_EXE).or_else(|| find_in_path(FFMPEG_EXE))
 }
 
 /// Total size, in bytes, of the files directly in `dir`.
@@ -440,6 +466,8 @@ fn main() -> eframe::Result<()> {
                     .flatten();
                 app.delete_cache_on_exit =
                     eframe::get_value(storage, DELETE_ON_EXIT_KEY).unwrap_or(false);
+                app.open_dir_on_save =
+                    eframe::get_value(storage, OPEN_DIR_ON_SAVE_KEY).unwrap_or(false);
                 app.volume = eframe::get_value(storage, VOLUME_KEY).unwrap_or(0.5);
                 if let Some(name) = eframe::get_value::<String>(storage, THEME_KEY) {
                     app.theme = theme_pref_from_name(&name);
@@ -786,6 +814,9 @@ struct App {
     want_video: bool,
     want_audio: bool,
     status: String,
+    /// Path of the most recently saved export; drives the "Open folder" button
+    /// next to the status line. `None` until a save succeeds.
+    saved_path: Option<PathBuf>,
     /// Full text of the last failed operation (yt-dlp fetch/download or export),
     /// shown in a dismissable error panel; `None` once cleared or after a success.
     last_error: Option<String>,
@@ -836,6 +867,8 @@ struct App {
     output_dir: Option<PathBuf>,
     /// Clear the managed cache directory when the app closes.
     delete_cache_on_exit: bool,
+    /// Reveal the saved file's folder in the system file manager after a save.
+    open_dir_on_save: bool,
 
     show_cache: bool,
     cache_entries: Vec<CacheEntry>,
@@ -875,6 +908,7 @@ impl Default for App {
             want_video: true,
             want_audio: true,
             status: String::new(),
+            saved_path: None,
             last_error: None,
             ytdlp_updating: false,
             ytdlp_version: None,
@@ -899,6 +933,7 @@ impl Default for App {
             download_dir: None,
             output_dir: None,
             delete_cache_on_exit: false,
+            open_dir_on_save: false,
             show_cache: false,
             cache_entries: Vec::new(),
             cache_rx: None,
@@ -964,6 +999,10 @@ impl App {
                     self.progress = None;
                     self.exporting = false;
                     self.export_path = None;
+                    if self.open_dir_on_save {
+                        reveal_in_file_manager(&path);
+                    }
+                    self.saved_path = Some(path);
                     return;
                 }
                 Ok(Msg::ExportCanceled(path)) => {
@@ -1355,6 +1394,7 @@ impl App {
         };
         self.status = "exporting…".into();
         self.exporting = true;
+        self.saved_path = None;
         self.export_path = Some(out);
         let cancel = Arc::new(AtomicBool::new(false));
         self.export_cancel = cancel.clone();
@@ -1440,6 +1480,7 @@ impl App {
             None => "Not set — dialog opens at the system default".to_owned(),
         };
         let mut new_output_dir: Option<Option<PathBuf>> = None;
+        let mut open_dir_on_save = self.open_dir_on_save;
         let mut clear_cache = false;
         let keybinds = self.keybinds;
         let mut rebinding = self.rebinding;
@@ -1472,6 +1513,9 @@ impl App {
                             ui.label("Interface scale");
                             let slider_w = (ui.available_width() - SCALE_VALUE_W).max(0.0);
                             ui.spacing_mut().slider_width = slider_w;
+                            // Match the slider's editable value box to the button
+                            // height so it lines up with Apply/Reset below.
+                            ui.spacing_mut().interact_size.y = button_height(ui);
                             ui.add(
                                 egui::Slider::new(&mut pending, 0.75..=2.5)
                                     .step_by(0.05)
@@ -1565,6 +1609,7 @@ impl App {
                         new_output_dir = Some(None);
                     }
                 });
+                ui.checkbox(&mut open_dir_on_save, "Open output folder after saving");
 
                 ui.add_space(SECTION_GAP);
                 ui.separator();
@@ -1626,6 +1671,7 @@ impl App {
             apply_theme(ctx, theme);
         }
         self.delete_cache_on_exit = delete_on_exit;
+        self.open_dir_on_save = open_dir_on_save;
         if let Some(dir) = new_download_dir {
             self.download_dir = dir;
         }
@@ -1788,8 +1834,16 @@ impl App {
             if !self.status.is_empty() {
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
+                    // Pin the row to the button's height so the labels and the
+                    // taller button both center vertically against it.
+                    ui.set_min_height(button_height(ui));
                     ui.label("Status:");
                     ui.monospace(&self.status);
+                    if let Some(saved) = &self.saved_path {
+                        if ui.button("Open folder").clicked() {
+                            reveal_in_file_manager(saved);
+                        }
+                    }
                 });
             }
             self.error_panel(ui);
@@ -2017,6 +2071,9 @@ impl App {
                 ui.separator();
                 ui.label("🔊");
                 ui.spacing_mut().slider_width = 90.0;
+                // Match the slider's value box to the button height so it lines
+                // up with the transport buttons beside it.
+                ui.spacing_mut().interact_size.y = button_height(ui);
                 let vol = ui.add(
                     egui::Slider::new(&mut self.volume, 0.0..=1.0)
                         .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
@@ -2131,6 +2188,7 @@ impl eframe::App for App {
         eframe::set_value(storage, DOWNLOAD_DIR_KEY, &self.download_dir);
         eframe::set_value(storage, OUTPUT_DIR_KEY, &self.output_dir);
         eframe::set_value(storage, DELETE_ON_EXIT_KEY, &self.delete_cache_on_exit);
+        eframe::set_value(storage, OPEN_DIR_ON_SAVE_KEY, &self.open_dir_on_save);
         eframe::set_value(storage, VOLUME_KEY, &self.volume);
         eframe::set_value(storage, THEME_KEY, &theme_pref_name(self.theme).to_owned());
         // Persist each shortcut as (key name, shift) so we don't depend on egui's

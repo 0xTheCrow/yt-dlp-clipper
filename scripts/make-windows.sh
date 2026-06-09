@@ -78,11 +78,14 @@ export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
 cargo xwin build --release --target "$TARGET"
 
 # --- stage one self-contained folder ------------------------------------------
+# Only yt-dlp-clipper.exe sits at the bundle root, so it's the obvious thing to
+# click. The helper exes go in bin/ (the resolver looks there); the FFmpeg DLLs
+# stay at the root because Windows loads them from the exe's own dir at startup.
 echo "==> Staging bundle"
-rm -rf "$DIST"; mkdir -p "$DIST"
+rm -rf "$DIST"; mkdir -p "$DIST/bin"
 cp "target/$TARGET/release/yank.exe" "$DIST/yt-dlp-clipper.exe"
-cp "$YTDLP_EXE"                      "$DIST/yt-dlp.exe"
-cp "$FFMPEG_DIR/bin/ffmpeg.exe"      "$DIST/ffmpeg.exe"
+cp "$YTDLP_EXE"                      "$DIST/bin/yt-dlp.exe"
+cp "$FFMPEG_DIR/bin/ffmpeg.exe"      "$DIST/bin/ffmpeg.exe"
 # FFmpeg runtime DLLs the app links against (Windows loads these from the exe dir).
 cp "$FFMPEG_DIR"/bin/*.dll "$DIST"
 

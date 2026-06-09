@@ -67,12 +67,15 @@ cargo build --release
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 
 # --- stage one self-contained folder ------------------------------------------
+# Only yt-dlp-clipper.exe sits at the bundle root, so it's the obvious thing to
+# click. The helper exes go in bin\ (the resolver looks there); the FFmpeg DLLs
+# stay at the root because Windows loads them from the exe's own dir at startup.
 Write-Host '==> Staging bundle'
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
-New-Item -ItemType Directory -Force -Path $dist | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $dist 'bin') | Out-Null
 Copy-Item 'target\release\yank.exe' (Join-Path $dist 'yt-dlp-clipper.exe')
-Copy-Item $ytdlpExe                 (Join-Path $dist 'yt-dlp.exe')
-Copy-Item (Join-Path $ffmpegDir 'bin\ffmpeg.exe') (Join-Path $dist 'ffmpeg.exe')
+Copy-Item $ytdlpExe                 (Join-Path $dist 'bin\yt-dlp.exe')
+Copy-Item (Join-Path $ffmpegDir 'bin\ffmpeg.exe') (Join-Path $dist 'bin\ffmpeg.exe')
 # FFmpeg runtime DLLs the app links against (Windows loads these from the exe dir).
 Copy-Item (Join-Path $ffmpegDir 'bin\*.dll') $dist
 
