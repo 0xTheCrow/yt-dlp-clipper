@@ -18,6 +18,46 @@ fn h264_with_opus() -> PathBuf {
     .clone()
 }
 
+/// AV1 video (no audio) in MP4 — a codec MP4 can hold but most phones can't
+/// decode, so compatibility mode must re-encode it to H.264.
+fn av1_in_mp4() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        common::generate(
+            "fixture_av1.mp4",
+            &["-map", "0:v", "-c:v", "libaom-av1", "-cpu-used", "8", "-b:v", "200k"],
+        )
+    })
+    .clone()
+}
+
+/// 10-bit H.264 (High 10) + AAC in MP4 — the codec fits MP4 but 10-bit doesn't
+/// decode on most mobile hardware, so compatibility mode re-encodes to 8-bit.
+fn h264_10bit() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        common::generate(
+            "fixture_h264_10bit.mp4",
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p10le", "-profile:v", "high10",
+              "-c:a", "aac", "-shortest"],
+        )
+    })
+    .clone()
+}
+
+/// H.264 video + AC-3 audio in MKV — AC-3 fits MP4 by copy but doesn't decode on
+/// iOS, so compatibility mode re-encodes it to AAC.
+fn h264_with_ac3() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        common::generate(
+            "fixture_h264_ac3.mkv",
+            &["-c:v", "libx264", "-c:a", "ac3", "-shortest"],
+        )
+    })
+    .clone()
+}
+
 /// Read a single ffprobe field (one value per line).
 fn ffprobe(path: &Path, entries: &str) -> String {
     let output = Command::new("ffprobe")
@@ -52,6 +92,17 @@ fn run_from(
     start: f64,
     end: f64,
 ) -> std::path::PathBuf {
+    run_from_compat(input, mode, out_name, start, end, true)
+}
+
+fn run_from_compat(
+    input: std::path::PathBuf,
+    mode: Mode,
+    out_name: &str,
+    start: f64,
+    end: f64,
+    compatibility_mode: bool,
+) -> std::path::PathBuf {
     let out = std::env::temp_dir().join(out_name);
     let _ = std::fs::remove_file(&out);
     export(&ExportSpec {
@@ -61,6 +112,7 @@ fn run_from(
         end_secs: end,
         mode,
         scale_height: None,
+        compatibility_mode,
     })
     .expect("export should succeed");
     out
@@ -135,6 +187,54 @@ fn full_transcodes_vp9_into_mp4() {
     assert_eq!(codec_of(&out, "video"), "h264", "vp9 should be transcoded to h264");
 }
 
+/// Pixel format of a file's video stream (e.g. `yuv420p`, `yuv420p10le`).
+fn pix_fmt_of(path: &Path) -> String {
+    ffprobe(path, "stream=pix_fmt").lines().next().unwrap_or("").trim().to_string()
+}
+
+#[test]
+fn compat_transcodes_av1_into_h264_in_mp4() {
+    // AV1 fits MP4 but won't play on most phones, so compatibility mode re-encodes.
+    let out = run_from_compat(av1_in_mp4(), Mode::Full, "export_av1_compat.mp4", 0.0, common::DURATION_SECS, true);
+    assert_eq!(codec_of(&out, "video"), "h264", "av1 should be transcoded to h264");
+}
+
+#[test]
+fn noncompat_copies_av1_into_mp4() {
+    // With compatibility off, AV1 is copied into MP4 as-is.
+    let out = run_from_compat(av1_in_mp4(), Mode::Full, "export_av1_raw.mp4", 0.0, common::DURATION_SECS, false);
+    assert_eq!(codec_of(&out, "video"), "av1", "av1 should be copied unchanged");
+}
+
+#[test]
+fn compat_reencodes_10bit_h264_to_8bit() {
+    // 10-bit H.264 fits MP4 by codec but not by pixel format on mobile hardware.
+    let out = run_from_compat(h264_10bit(), Mode::Full, "export_10bit_compat.mp4", 0.0, common::DURATION_SECS, true);
+    assert_eq!(codec_of(&out, "video"), "h264");
+    assert_eq!(pix_fmt_of(&out), "yuv420p", "10-bit should be re-encoded to 8-bit");
+}
+
+#[test]
+fn noncompat_copies_10bit_h264() {
+    // With compatibility off, the 10-bit stream is copied through untouched.
+    let out = run_from_compat(h264_10bit(), Mode::Full, "export_10bit_raw.mp4", 0.0, common::DURATION_SECS, false);
+    assert_eq!(pix_fmt_of(&out), "yuv420p10le", "10-bit should be preserved");
+}
+
+#[test]
+fn compat_reencodes_ac3_audio_to_aac() {
+    // AC-3 fits MP4 by copy but doesn't decode on iOS, so compatibility re-encodes.
+    let out = run_from_compat(h264_with_ac3(), Mode::Full, "export_ac3_compat.mp4", 0.0, common::DURATION_SECS, true);
+    assert_eq!(codec_of(&out, "audio"), "aac", "ac3 should be transcoded to aac");
+}
+
+#[test]
+fn noncompat_copies_ac3_into_mp4() {
+    // With compatibility off, AC-3 is copied into MP4 as-is.
+    let out = run_from_compat(h264_with_ac3(), Mode::Full, "export_ac3_raw.mp4", 0.0, common::DURATION_SECS, false);
+    assert_eq!(codec_of(&out, "audio"), "ac3", "ac3 should be copied unchanged");
+}
+
 #[test]
 fn clip_transcodes_into_webm() {
     // WebM holds neither H.264 nor AAC, so the clip must become VP9 + Opus.
@@ -196,6 +296,7 @@ fn run_scaled(mode: Mode, out_name: &str, height: u32) -> (u32, u32) {
         end_secs: 1.5,
         mode,
         scale_height: Some(height),
+        compatibility_mode: true,
     })
     .expect("export should succeed");
     let dims = ffprobe(&out, "stream=width,height");

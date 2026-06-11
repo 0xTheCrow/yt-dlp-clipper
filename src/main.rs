@@ -20,6 +20,7 @@ const KEYBINDS_KEY: &str = "keybinds";
 const OUTPUT_DIR_KEY: &str = "output_dir";
 const OPEN_DIR_ON_SAVE_KEY: &str = "open_dir_on_save";
 const THEME_KEY: &str = "theme";
+const COMPATIBILITY_MODE_KEY: &str = "compatibility_mode";
 
 /// Standard heights offered when downscaling a saved video, tallest first. Only
 /// those shorter than the source are shown, so the menu never upscales.
@@ -65,6 +66,52 @@ fn icon_button(ui: &mut egui::Ui, icon: egui::ImageSource<'_>, text: &str) -> eg
     let size = ui.text_style_height(&egui::TextStyle::Button);
     let image = egui::Image::new(icon).fit_to_exact_size(egui::Vec2::splat(size));
     ui.add(egui::Button::image_and_text(image, text))
+}
+
+/// Width of the toggle switch as a multiple of its height (the track is a
+/// rounded pill, so this is how far the knob travels plus its diameter).
+const SWITCH_WIDTH_RATIO: f32 = 1.6;
+/// Knob radius as a fraction of the track's half-height; big enough to hold the
+/// "on"/"off" label, slightly inset from the track edge.
+const SWITCH_KNOB_RATIO: f32 = 0.8;
+/// "on"/"off" label font size as a fraction of the switch height.
+const SWITCH_LABEL_RATIO: f32 = 0.42;
+
+/// A sliding on/off switch: a pill track with a knob that animates between
+/// sides. egui has no built-in switch, so this is the canonical hand-drawn one,
+/// styled from the active theme's selectable colors.
+fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let desired_size = ui.spacing().interact_size.y * egui::vec2(SWITCH_WIDTH_RATIO, 1.0);
+    let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, "")
+    });
+
+    if ui.is_rect_visible(rect) {
+        let how_on = ui.ctx().animate_bool(response.id, *on);
+        let visuals = ui.style().interact_selectable(&response, *on);
+        let rect = rect.expand(visuals.expansion);
+        let radius = 0.5 * rect.height();
+        // Track fills with the accent color when on (via interact_selectable), so
+        // the state reads as both knob-on-the-right and a color change.
+        ui.painter().rect(rect, radius, visuals.bg_fill, visuals.bg_stroke);
+        let knob_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+        let center = egui::pos2(knob_x, rect.center().y);
+        let knob_radius = SWITCH_KNOB_RATIO * radius;
+        // Contrasting knob fill (panel "extreme" bg) so the knob stands out from
+        // the track in either theme; the label rides inside it.
+        ui.painter()
+            .circle(center, knob_radius, ui.visuals().extreme_bg_color, visuals.fg_stroke);
+        let label = if *on { "on" } else { "off" };
+        let font = egui::FontId::proportional(rect.height() * SWITCH_LABEL_RATIO);
+        ui.painter()
+            .text(center, egui::Align2::CENTER_CENTER, label, font, ui.visuals().text_color());
+    }
+    response
 }
 
 /// Reveal a saved file in the system file manager, selecting it when the
@@ -468,6 +515,8 @@ fn main() -> eframe::Result<()> {
                     eframe::get_value(storage, DELETE_ON_EXIT_KEY).unwrap_or(false);
                 app.open_dir_on_save =
                     eframe::get_value(storage, OPEN_DIR_ON_SAVE_KEY).unwrap_or(false);
+                app.compatibility_mode =
+                    eframe::get_value(storage, COMPATIBILITY_MODE_KEY).unwrap_or(true);
                 app.volume = eframe::get_value(storage, VOLUME_KEY).unwrap_or(0.5);
                 if let Some(name) = eframe::get_value::<String>(storage, THEME_KEY) {
                     app.theme = theme_pref_from_name(&name);
@@ -878,6 +927,10 @@ struct App {
     audio_format: export::AudioFormat,
     /// Target container for "Save clip" / "Save full video".
     video_format: export::VideoFormat,
+    /// When set, a saved MP4/MOV is restricted to broadly-playable codecs
+    /// (H.264 8-bit + AAC/MP3), re-encoding anything else; when clear, the
+    /// source codec/quality is kept (HEVC/AV1, 10-bit, HDR). On by default.
+    compatibility_mode: bool,
     /// Downscale height for saved video; `None` keeps the source resolution.
     export_height: Option<u32>,
 
@@ -939,6 +992,7 @@ impl Default for App {
             cache_rx: None,
             audio_format: export::AudioFormat::Mp3,
             video_format: export::VideoFormat::Mp4,
+            compatibility_mode: true,
             export_height: None,
             playing: false,
             play_until: None,
@@ -1391,6 +1445,7 @@ impl App {
             end_secs: self.out_secs,
             mode,
             scale_height,
+            compatibility_mode: self.compatibility_mode,
         };
         self.status = "exporting…".into();
         self.exporting = true;
@@ -2158,6 +2213,22 @@ impl App {
                     });
                 ui.label("Resolution:");
 
+                // Compatibility only changes the MP4/MOV path; for MKV/WebM (not
+                // iOS-playable regardless of codec) the control is greyed out.
+                let compat_applies = matches!(
+                    self.video_format,
+                    export::VideoFormat::Mp4 | export::VideoFormat::Mov
+                );
+                let compat_hover = "Re-encode a saved MP4/MOV to H.264 8-bit + AAC so it \
+                    plays on phones (iOS/Android) and TVs, not just computers. Turn off to \
+                    keep the source codec and quality (HEVC/AV1, 10-bit, 4K HDR).";
+                ui.add_enabled_ui(compat_applies, |ui| {
+                    // Right-to-left layout: add the switch first so the label lands
+                    // to its left, reading "Compatible ▢".
+                    toggle_switch(ui, &mut self.compatibility_mode).on_hover_text(compat_hover);
+                    ui.label("Compatible").on_hover_text(compat_hover);
+                });
+
                 egui::ComboBox::from_id_salt("video_format")
                     .selected_text(vid.to_uppercase())
                     .show_ui(ui, |ui| {
@@ -2189,6 +2260,7 @@ impl eframe::App for App {
         eframe::set_value(storage, OUTPUT_DIR_KEY, &self.output_dir);
         eframe::set_value(storage, DELETE_ON_EXIT_KEY, &self.delete_cache_on_exit);
         eframe::set_value(storage, OPEN_DIR_ON_SAVE_KEY, &self.open_dir_on_save);
+        eframe::set_value(storage, COMPATIBILITY_MODE_KEY, &self.compatibility_mode);
         eframe::set_value(storage, VOLUME_KEY, &self.volume);
         eframe::set_value(storage, THEME_KEY, &theme_pref_name(self.theme).to_owned());
         // Persist each shortcut as (key name, shift) so we don't depend on egui's

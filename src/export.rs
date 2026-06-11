@@ -80,6 +80,13 @@ pub struct ExportSpec {
     /// `Some` and the source is taller. `None` keeps the source resolution. Never
     /// upscales. Ignored for audio-only exports.
     pub scale_height: Option<u32>,
+    /// Restrict an MP4/MOV export to codecs and pixel formats that play on every
+    /// target device (phones and TVs, not just computers): only H.264 8-bit
+    /// 4:2:0 video and AAC/MP3 audio are stream-copied, anything else is
+    /// re-encoded. When `false`, any codec the container can hold is copied as-is
+    /// (e.g. HEVC/AV1, 10-bit, HDR), trading reach for fidelity. Ignored for the
+    /// MKV/WebM containers and for audio-only exports.
+    pub compatibility_mode: bool,
 }
 
 pub fn export(spec: &ExportSpec) -> Result<()> {
@@ -158,24 +165,58 @@ fn container_kind(output: &str) -> Container {
     }
 }
 
-/// Whether `container` can hold `codec` as a video stream via stream copy.
-fn video_fits(container: Container, codec: ffmpeg::codec::Id) -> bool {
+/// Whether `container` can hold `codec` as a video stream via stream copy. In
+/// `compatibility_mode` the MP4/MOV family is narrowed to H.264 — the one video
+/// codec every target device decodes — so HEVC/AV1/MPEG-4 are re-encoded rather
+/// than copied into a file phones can't play.
+fn video_fits(container: Container, codec: ffmpeg::codec::Id, compatibility_mode: bool) -> bool {
     use ffmpeg::codec::Id::*;
     match container {
         Container::Mkv => true,
+        Container::Mp4 if compatibility_mode => matches!(codec, H264),
         Container::Mp4 => matches!(codec, H264 | HEVC | MPEG4 | AV1),
         Container::Webm => matches!(codec, VP8 | VP9 | AV1),
     }
 }
 
-/// Whether `container` can hold `codec` as an audio stream via stream copy.
-fn audio_fits(container: Container, codec: ffmpeg::codec::Id) -> bool {
+/// Whether `container` can hold `codec` as an audio stream via stream copy. In
+/// `compatibility_mode` the MP4/MOV family is narrowed to AAC/MP3 (AC-3 doesn't
+/// decode on iOS, Apple Lossless doesn't on non-Apple devices), so those
+/// re-encode.
+fn audio_fits(container: Container, codec: ffmpeg::codec::Id, compatibility_mode: bool) -> bool {
     use ffmpeg::codec::Id::*;
     match container {
         Container::Mkv => true,
+        Container::Mp4 if compatibility_mode => matches!(codec, AAC | MP3),
         Container::Mp4 => matches!(codec, AAC | MP3 | AC3 | ALAC),
         Container::Webm => matches!(codec, OPUS | VORBIS),
     }
+}
+
+/// 8-bit 4:2:0 pixel formats a copied MP4 video stream can use and still decode
+/// on phone/TV hardware. 10-bit (and 4:2:2/4:4:4) H.264 plays on computers but
+/// not on most mobile decoders, so compatibility mode re-encodes it down to one
+/// of these rather than stream-copying it.
+fn pix_copy_safe(params: &ffmpeg::codec::Parameters) -> bool {
+    use ffmpeg::ffi::AVPixelFormat::*;
+    let fmt = unsafe { (*params.as_ptr()).format };
+    fmt == AV_PIX_FMT_YUV420P as i32
+        || fmt == AV_PIX_FMT_YUVJ420P as i32
+        || fmt == AV_PIX_FMT_NV12 as i32
+}
+
+/// Whether the video stream `(codec, params)` can be stream-copied into
+/// `container` and still play on every target device. Layers the
+/// `compatibility_mode` pixel-format guard (MP4 only) on top of the container's
+/// codec list.
+fn video_copyable(
+    container: Container,
+    codec: ffmpeg::codec::Id,
+    params: &ffmpeg::codec::Parameters,
+    compatibility_mode: bool,
+) -> bool {
+    video_fits(container, codec, compatibility_mode)
+        && (!(compatibility_mode && container == Container::Mp4) || pix_copy_safe(params))
 }
 
 /// Output `w`×`h` for a source sized `w`×`h`, downscaled so the height is at
@@ -207,8 +248,9 @@ fn export_full(spec: &ExportSpec, cancel: &AtomicBool) -> Result<()> {
     // Downscaling can't be done by a stream copy, so it forces a re-encode.
     let (video_ok, downscale) = match ictx.streams().best(Type::Video) {
         Some(s) => {
-            let fits = video_fits(container, s.parameters().id());
-            let src_h = unsafe { (*s.parameters().as_ptr()).height } as u32;
+            let params = s.parameters();
+            let fits = video_copyable(container, params.id(), &params, spec.compatibility_mode);
+            let src_h = unsafe { (*params.as_ptr()).height } as u32;
             (fits, matches!(spec.scale_height, Some(th) if src_h > th))
         }
         None => (true, false),
@@ -216,7 +258,7 @@ fn export_full(spec: &ExportSpec, cancel: &AtomicBool) -> Result<()> {
     let audio_ok = ictx
         .streams()
         .best(Type::Audio)
-        .map_or(true, |s| audio_fits(container, s.parameters().id()));
+        .map_or(true, |s| audio_fits(container, s.parameters().id(), spec.compatibility_mode));
     drop(ictx);
 
     if video_ok && audio_ok && !downscale {
@@ -792,7 +834,7 @@ fn transcode(spec: &ExportSpec, container: Container, clip: bool, cancel: &Atomi
         v_in_tb = in_tb;
         let src_h = unsafe { (*params.as_ptr()).height } as u32;
         let downscale = matches!(spec.scale_height, Some(th) if src_h > th);
-        if clip || downscale || !video_fits(container, codec) {
+        if clip || downscale || !video_copyable(container, codec, &params, spec.compatibility_mode) {
             let decoder = ffmpeg::codec::context::Context::from_parameters(params)?
                 .decoder()
                 .video()?;
@@ -833,7 +875,7 @@ fn transcode(spec: &ExportSpec, container: Container, clip: bool, cancel: &Atomi
     if let Some((index, in_tb, codec, params)) = audio_meta {
         a_in_index = index;
         a_in_tb = in_tb;
-        if !clip && audio_fits(container, codec) {
+        if !clip && audio_fits(container, codec, spec.compatibility_mode) {
             let mut out = octx.add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::None))?;
             out.set_parameters(params);
             unsafe {
