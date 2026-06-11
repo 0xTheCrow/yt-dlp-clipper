@@ -4985,6 +4985,7 @@ name = "yt-dlp-clipper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "cpal",
  "eframe",
  "egui",

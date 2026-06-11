@@ -114,6 +114,97 @@ fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     response
 }
 
+/// Read UTF-8 text from the system clipboard, or `None` when it's empty or
+/// unavailable. Writing goes through egui (`Context::copy_text`); only reading
+/// (for Paste) needs direct clipboard access.
+fn clipboard_text() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
+/// Byte offset of the `char_index`-th character in `s` (its end if past the end),
+/// for turning egui's char-based cursor indices into `&str` slice bounds.
+fn char_to_byte(s: &str, char_index: usize) -> usize {
+    s.char_indices().nth(char_index).map_or(s.len(), |(b, _)| b)
+}
+
+/// Collapse a `TextEdit`'s caret to `char_index` and persist it, so an edit made
+/// outside the widget (a context-menu Cut/Paste) leaves the cursor where the
+/// user expects on the next frame.
+fn set_text_cursor(ctx: &egui::Context, id: egui::Id, char_index: usize) {
+    if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, id) {
+        let cursor = egui::text::CCursor::new(char_index);
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(cursor)));
+        state.store(ctx, id);
+    }
+}
+
+/// The selection (or bare caret) of the `TextEdit` with this `id`, as char
+/// indices.
+fn text_edit_selection(ctx: &egui::Context, id: egui::Id) -> Option<egui::text::CCursorRange> {
+    egui::text_edit::TextEditState::load(ctx, id).and_then(|s| s.cursor.char_range())
+}
+
+/// Attach a Cut/Copy/Paste context menu to a single-line `TextEdit` editing
+/// `text` and identified by `id`. `prev_selection` is the field's selection read
+/// before it was drawn this frame: a right-press collapses the selection, so it
+/// is restored here for the menu to act on. Cut/Paste edit `text` directly and
+/// mark `response` changed, so a caller mirroring `text` elsewhere still sees it.
+fn attach_text_menu(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    text: &mut String,
+    response: &mut egui::Response,
+    prev_selection: Option<egui::text::CCursorRange>,
+) {
+    // A right-press collapses the selection, so restore it (and focus the field)
+    // for Cut/Copy/Paste to operate on.
+    if response.contains_pointer() && ui.input(|i| i.pointer.secondary_pressed()) {
+        if let (Some(range), Some(mut state)) =
+            (prev_selection, egui::text_edit::TextEditState::load(ui.ctx(), id))
+        {
+            state.cursor.set_char_range(Some(range));
+            state.store(ui.ctx(), id);
+        }
+        ui.memory_mut(|m| m.request_focus(id));
+    }
+
+    let mut edited = false;
+    response.context_menu(|ui| {
+        // Sorted (start, end) char indices of the selection; equal for a caret.
+        let (start, end) = text_edit_selection(ui.ctx(), id).map_or((0, 0), |r| {
+            let (p, s) = (r.primary.index, r.secondary.index);
+            (p.min(s), p.max(s))
+        });
+        let has_selection = start != end;
+        let (byte_start, byte_end) = (char_to_byte(text, start), char_to_byte(text, end));
+
+        if ui.add_enabled(has_selection, egui::Button::new("Cut")).clicked() {
+            ui.ctx().copy_text(text[byte_start..byte_end].to_owned());
+            text.replace_range(byte_start..byte_end, "");
+            set_text_cursor(ui.ctx(), id, start);
+            edited = true;
+            ui.close_menu();
+        }
+        if ui.add_enabled(has_selection, egui::Button::new("Copy")).clicked() {
+            ui.ctx().copy_text(text[byte_start..byte_end].to_owned());
+            ui.close_menu();
+        }
+        if ui.button("Paste").clicked() {
+            if let Some(clip) = clipboard_text() {
+                // Trim surrounding whitespace/newlines a single-line field can't hold.
+                let pasted = clip.trim();
+                text.replace_range(byte_start..byte_end, pasted);
+                set_text_cursor(ui.ctx(), id, start + pasted.chars().count());
+                edited = true;
+            }
+            ui.close_menu();
+        }
+    });
+    if edited {
+        response.mark_changed();
+    }
+}
+
 /// Reveal a saved file in the system file manager, selecting it when the
 /// platform supports it and otherwise opening its containing folder.
 fn reveal_in_file_manager(path: &Path) {
@@ -1772,10 +1863,15 @@ impl App {
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.label("URL:");
-                    let url_field = ui.add_sized(
+                    let url_id = egui::Id::new("url_input_field");
+                    // Read the selection before drawing the field; a right-press
+                    // collapses it, and `attach_text_menu` restores this.
+                    let prev_selection = text_edit_selection(ui.ctx(), url_id);
+                    let mut url_field = ui.add_sized(
                         [260.0, row_h],
-                        egui::TextEdit::singleline(&mut self.url).margin(INPUT_MARGIN),
+                        egui::TextEdit::singleline(&mut self.url).id(url_id).margin(INPUT_MARGIN),
                     );
+                    attach_text_menu(ui, url_id, &mut self.url, &mut url_field, prev_selection);
                     let submitted =
                         url_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let fetch = icon_button(ui, download_icon(), "Fetch");
@@ -2396,14 +2492,16 @@ impl eframe::App for App {
                         {
                             pick_output = true;
                         }
-                        if ui
-                            .add(
-                                egui::TextEdit::singleline(&mut title)
-                                    .desired_width(f32::INFINITY)
-                                    .margin(INPUT_MARGIN),
-                            )
-                            .changed()
-                        {
+                        let title_id = egui::Id::new("title_input_field");
+                        let prev_selection = text_edit_selection(ui.ctx(), title_id);
+                        let mut title_field = ui.add(
+                            egui::TextEdit::singleline(&mut title)
+                                .id(title_id)
+                                .desired_width(f32::INFINITY)
+                                .margin(INPUT_MARGIN),
+                        );
+                        attach_text_menu(ui, title_id, &mut title, &mut title_field, prev_selection);
+                        if title_field.changed() {
                             self.video_title = Some(title);
                         }
                     });

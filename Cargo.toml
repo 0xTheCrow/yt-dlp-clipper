@@ -19,6 +19,11 @@ ffmpeg-the-third = "1.2"
 # native file open/save dialogs
 rfd = "0.15"
 
+# read the system clipboard for the URL field's right-click Paste (egui can write
+# the clipboard but not read it); already in the tree as an eframe dependency.
+# `default-features = false` drops the image-clipboard support we don't use.
+arboard = { version = "3", default-features = false }
+
 # audio output for synced playback (no std equivalent)
 cpal = "0.15"
 
