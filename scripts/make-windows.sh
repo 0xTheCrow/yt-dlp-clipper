@@ -90,7 +90,7 @@ cp "$FFMPEG_DIR/bin/ffmpeg.exe"      "$DIST/bin/ffmpeg.exe"
 cp "$FFMPEG_DIR"/bin/*.dll "$DIST"
 
 # --- zip -----------------------------------------------------------------------
-VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
 ZIP="$ROOT/yt-dlp-clipper-$VERSION-win64.zip"
 rm -f "$ZIP"
 ( cd "$BUILD" && zip -qr "$ZIP" "yt-dlp-clipper" )

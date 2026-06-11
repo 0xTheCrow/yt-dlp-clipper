@@ -30,7 +30,7 @@ APP="$BUILD/$APP_NAME.app"
 MACOS_DIR="$APP/Contents/MacOS"
 RES_DIR="$APP/Contents/Resources"
 BUNDLE_ID="com.cooper.yt-dlp-clipper"
-VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
 
 ARCH="$(uname -m)"                  # arm64 (Apple Silicon) or x86_64 (Intel); host-arch build
 case "$ARCH" in
