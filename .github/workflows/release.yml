@@ -117,6 +117,9 @@ jobs:
           ./configure \
             --prefix=/ucrt64/custom-ffmpeg \
             --target-os=mingw32 \
+            --arch=x86_64 \
+            --enable-cross-compile \
+            --cross-prefix= \
             --enable-static --disable-shared \
             --enable-gpl \
             --disable-autodetect \
