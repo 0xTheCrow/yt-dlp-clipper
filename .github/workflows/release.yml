@@ -89,17 +89,25 @@ jobs:
         id: ffmpeg-cache
         with:
           path: /opt/win-libs
-          key: win-cross-ffmpeg-6.0-v1-${{ hashFiles('.github/workflows/release.yml') }}
+          key: win-cross-ffmpeg-6.0-v2-${{ hashFiles('.github/workflows/release.yml') }}
 
       # Build static Windows libs via cross-compiler. Each codec is configured
-      # with --host=x86_64-w64-mingw32 (or equivalent) and installed into the
-      # shared prefix so FFmpeg's configure finds them via PKG_CONFIG_LIBDIR.
+      # with --host=x86_64-w64-mingw32 and installed into the shared prefix so
+      # FFmpeg's configure finds them via PKG_CONFIG_LIBDIR.
+      # Cross tools are set explicitly (CC/AR/RANLIB) because libtool sometimes
+      # ignores --host when the cross-compiler isn't the only thing in PATH.
       - name: Build Windows codec + FFmpeg static libs
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           PREFIX=/opt/win-libs
           CROSS=x86_64-w64-mingw32
+          export CC=$CROSS-gcc
+          export CXX=$CROSS-g++
+          export AR=$CROSS-ar
+          export RANLIB=$CROSS-ranlib
+          export STRIP=$CROSS-strip
+          export NM=$CROSS-nm
           mkdir -p build "$PREFIX"
 
           # x264
@@ -109,6 +117,7 @@ jobs:
             --prefix=$PREFIX \
             --enable-static --disable-shared --disable-cli && \
             make -j$(nproc) && make install)
+          test -f "$PREFIX/lib/libx264.a"
 
           # libvpx — uses CROSS env var for the binary prefix, not --host
           git clone --depth 1 https://github.com/webmproject/libvpx build/libvpx
@@ -119,31 +128,44 @@ jobs:
             --enable-static --disable-shared \
             --disable-unit-tests --disable-examples --disable-docs && \
             make -j$(nproc) && make install)
+          test -f "$PREFIX/lib/libvpx.a"
 
-          # opus (release tarball has configure pre-generated)
-          curl -fsSL https://downloads.xiph.org/releases/opus/opus-1.4.tar.gz \
-            | tar xz -C build/
-          (cd build/opus-1.4 && ./configure \
+          # opus 1.3.1 — use --strip-components=1 to avoid depending on tarball
+          # directory name; 1.3.1 is a stable release with configure pre-generated
+          mkdir -p build/opus-src
+          curl -fsSL https://downloads.xiph.org/releases/opus/opus-1.3.1.tar.gz \
+            | tar xz --strip-components=1 -C build/opus-src
+          (cd build/opus-src && ./configure \
             --host=$CROSS \
             --prefix=$PREFIX \
             --enable-static --disable-shared \
             --disable-doc --disable-extra-programs && \
             make -j$(nproc) && make install)
+          test -f "$PREFIX/lib/libopus.a"
 
-          # mp3lame
+          # mp3lame — strip-components=1 for robustness; explicitly pass cross
+          # tools because lame's libtool otherwise silently installs nothing
+          mkdir -p build/lame-src
           curl -fsSL \
             https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz \
-            | tar xz -C build/
-          (cd build/lame-3.100 && ./configure \
+            | tar xz --strip-components=1 -C build/lame-src
+          (cd build/lame-src && ./configure \
             --host=$CROSS \
             --prefix=$PREFIX \
             --enable-static --disable-shared \
             --disable-frontend --disable-gtktest && \
             make -j$(nproc) && make install)
+          # libtool cross-compile sometimes skips installing the .a; copy manually
+          if ! test -f "$PREFIX/lib/libmp3lame.a"; then
+            find build/lame-src -name 'libmp3lame.a' -exec cp {} "$PREFIX/lib/" \;
+          fi
+          test -f "$PREFIX/lib/libmp3lame.a"
 
           # FFmpeg 6.0
-          curl -fsSL https://ffmpeg.org/releases/ffmpeg-6.0.tar.bz2 | tar xj -C build/
-          (cd build/ffmpeg-6.0 && \
+          mkdir -p build/ffmpeg-src
+          curl -fsSL https://ffmpeg.org/releases/ffmpeg-6.0.tar.bz2 \
+            | tar xj --strip-components=1 -C build/ffmpeg-src
+          (cd build/ffmpeg-src && \
             PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" \
             PKG_CONFIG_PATH="" \
             ./configure \
