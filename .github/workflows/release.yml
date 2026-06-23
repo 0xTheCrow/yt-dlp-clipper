@@ -79,8 +79,14 @@ jobs:
             mingw-w64-ucrt-x86_64-opus
             mingw-w64-ucrt-x86_64-lame
 
-      - name: Add Rust MinGW target
-        run: rustup target add x86_64-pc-windows-gnu
+      # Install the GNU Rust toolchain and make it the default so HOST == TARGET
+      # (both x86_64-pc-windows-gnu). ffmpeg-sys-the-third's build script has a
+      # HOST != TARGET branch that assumes a cross-compiler prefix like
+      # "x86_64-w64-mingw32-gcc"; skipping that branch avoids a panic on rfind('-').
+      - name: Install MinGW Rust toolchain
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update
+          rustup default stable-x86_64-pc-windows-gnu
 
       - uses: Swatinem/rust-cache@v2
 
@@ -120,14 +126,13 @@ jobs:
           export CXX_x86_64_pc_windows_gnu=g++
           export AR_x86_64_pc_windows_gnu=ar
           export RUST_BACKTRACE=1
-          cargo build --release --target x86_64-pc-windows-gnu \
-            --features bundle-tools
+          cargo build --release --features bundle-tools
 
       - name: Stage release exe
         shell: bash
         run: |
           VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
-          cp target/x86_64-pc-windows-gnu/release/yt-dlp-clipper.exe \
+          cp target/release/yt-dlp-clipper.exe \
              "yt-dlp-clipper-${VERSION}-win64.exe"
 
       - uses: actions/upload-artifact@v4
