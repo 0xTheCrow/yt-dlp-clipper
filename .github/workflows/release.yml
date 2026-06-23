@@ -73,6 +73,7 @@ jobs:
             make
             diffutils
             mingw-w64-ucrt-x86_64-pkg-config
+            mingw-w64-ucrt-x86_64-clang
             mingw-w64-ucrt-x86_64-x264
             mingw-w64-ucrt-x86_64-libvpx
             mingw-w64-ucrt-x86_64-opus
@@ -105,8 +106,11 @@ jobs:
       - name: Build single exe
         shell: msys2 {0}
         run: |
-          export PKG_CONFIG_PATH="/ucrt64/lib/pkgconfig"
+          # Convert POSIX paths to Windows paths so Windows-native tools
+          # (pkg-config, libclang) can find them when invoked by build scripts.
+          export PKG_CONFIG_PATH="$(cygpath -w /ucrt64/lib/pkgconfig)"
           export PKG_CONFIG_ALL_STATIC=1
+          export LIBCLANG_PATH="$(cygpath -w /ucrt64/bin)"
           export BUNDLE_YTDLP="$(cygpath -w "$(pwd)/build/windows/yt-dlp.exe")"
           export BUNDLE_FFMPEG_CLI="$(cygpath -w "$(pwd)/build/windows/ffmpeg.exe")"
           export RUSTFLAGS="-C target-feature=+crt-static"
@@ -115,6 +119,7 @@ jobs:
           export CC_x86_64_pc_windows_gnu=gcc
           export CXX_x86_64_pc_windows_gnu=g++
           export AR_x86_64_pc_windows_gnu=ar
+          export RUST_BACKTRACE=1
           cargo build --release --target x86_64-pc-windows-gnu \
             --features bundle-tools
 
