@@ -103,6 +103,7 @@ fn run_from_compat(
     end: f64,
     compatibility_mode: bool,
 ) -> std::path::PathBuf {
+    common::init();
     let out = std::env::temp_dir().join(out_name);
     let _ = std::fs::remove_file(&out);
     export(&ExportSpec {
@@ -286,6 +287,7 @@ fn audio_only_aac_is_sample_accurate() {
 
 /// Export with a downscale target and return the output's video dimensions.
 fn run_scaled(mode: Mode, out_name: &str, height: u32) -> (u32, u32) {
+    common::init();
     let input = common::h264_with_audio();
     let out = std::env::temp_dir().join(out_name);
     let _ = std::fs::remove_file(&out);

@@ -9,6 +9,7 @@ const WIDTH: u32 = 320;
 const HEIGHT: u32 = 240;
 
 fn open(path: &std::path::Path) -> Decoder {
+    common::init();
     Decoder::open(path.to_str().unwrap()).expect("decoder should open the fixture")
 }
 

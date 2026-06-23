@@ -6,6 +6,18 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 
+/// Suppress FFmpeg's internal log output. Pass `--nocapture` to restore it:
+/// `cargo test -- --nocapture`
+pub fn init() {
+    static DONE: OnceLock<()> = OnceLock::new();
+    DONE.get_or_init(|| {
+        let nocapture = std::env::args().any(|a| a == "--nocapture" || a == "--show-output");
+        if !nocapture {
+            ffmpeg_the_third::util::log::set_level(ffmpeg_the_third::util::log::Level::Quiet);
+        }
+    });
+}
+
 const SIZE: &str = "320x240";
 pub const FPS: f64 = 30.0;
 pub const DURATION_SECS: f64 = 3.0;

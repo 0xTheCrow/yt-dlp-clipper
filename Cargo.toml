@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Pull videos with yt-dlp and trim them frame-accurately"
 
+[lib]
+doctest = false
+
 [dependencies]
 # GUI + GPU-backed texture upload for the video preview
 # `persistence` stores settings (UI scale) between sessions.
