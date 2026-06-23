@@ -67,6 +67,7 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
+          path-type: inherit   # make rustup's cargo visible inside the MSYS2 shell
           install: >-
             nasm
             make
