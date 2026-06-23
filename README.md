@@ -1,5 +1,3 @@
-# Cooper Clipper
-
 A cross-platform (Linux / Windows / macOS) desktop app to pull videos with
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) and trim them **frame-accurately** —
 saving the full video, a clip, or audio only.
