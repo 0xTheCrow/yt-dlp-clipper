@@ -72,6 +72,7 @@ jobs:
             nasm
             make
             diffutils
+            mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-pkg-config
             mingw-w64-ucrt-x86_64-clang
             mingw-w64-ucrt-x86_64-x264
