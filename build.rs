@@ -6,14 +6,18 @@ fn main() {
         embed("BUNDLE_YTDLP", "BUNDLED_YTDLP_PATH", "bundled-ytdlp", &out);
         embed("BUNDLE_FFMPEG_CLI", "BUNDLED_FFMPEG_CLI_PATH", "bundled-ffmpeg-cli", &out);
 
-        // On Windows the ffmpeg-sys-the-third build script (FFMPEG_DIR path) emits
-        // only the libav* link flags. The codec libs statically compiled into
-        // FFmpeg (and their Windows system deps) must be listed here so the linker
-        // can resolve their symbols when it encounters them inside the libav* .a files.
-        if cfg!(windows) {
+        // Emit link flags for the codec libraries statically compiled into FFmpeg
+        // and the Windows system libs they depend on. The ffmpeg-sys-the-third build
+        // script (FFMPEG_DIR path) only emits the libav* link flags; their transitive
+        // codec deps and Windows system libs must be listed here.
+        //
+        // Check CARGO_CFG_TARGET_OS (the compile *target*), not cfg!(windows) (the
+        // build *host*), so this also fires when cross-compiling from Linux.
+        let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+        if target_os == "windows" {
             println!("cargo:rerun-if-env-changed=CODEC_LIB_DIR");
             let codec_lib_dir = env::var("CODEC_LIB_DIR").unwrap_or_else(|_| {
-                panic!("CODEC_LIB_DIR must be set when building bundle-tools on Windows")
+                panic!("CODEC_LIB_DIR must be set when building bundle-tools for Windows")
             });
             println!("cargo:rustc-link-search=native={codec_lib_dir}");
             for lib in ["x264", "vpx", "opus", "mp3lame"] {
