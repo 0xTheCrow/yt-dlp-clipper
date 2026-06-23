@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Cross-compile a single self-contained Windows folder (zipped) for yt-dlp-clipper,
-# FROM LINUX. The Windows counterpart that builds natively is scripts/make-windows.ps1.
+# Cross-compile a self-contained Windows zip bundle for yt-dlp-clipper, FROM LINUX.
+# This is a developer convenience script; the CI release uses a native windows-latest
+# runner (see .github/workflows/release.yml) which produces a single .exe via the
+# bundle-tools feature. This script produces a zip with DLLs and is NOT a single exe.
 #
 # Only yt-dlp-clipper.exe needs a Windows toolchain; yt-dlp.exe and ffmpeg.exe are pure runtime
 # binaries we just download and stage next to it. We target x86_64-pc-windows-msvc via
 # cargo-xwin (it fetches the MSVC CRT + Windows SDK into a user cache — no Visual Studio,
 # no Wine). The app links FFmpeg's libav* at build time, so we point FFMPEG_DIR at the
-# same gyan 6.0 gpl-shared dev build the .ps1 uses — its import libs are MSVC, matching
-# this target exactly. The whole bundle is GPL (FFmpeg GPL build + x264).
+# gyan 6.0 gpl-shared dev build — its import libs are MSVC, matching this target exactly.
+# The whole bundle is GPL (FFmpeg GPL build + x264).
 #
 # Usage:  ./scripts/make-windows.sh
 #

@@ -4,11 +4,11 @@ name: Release
 # tag is pushed:
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# Linux (AppImage) + Windows (cross-compiled via cargo-xwin) build on one Ubuntu
-# job; macOS (.dmg) builds natively on an arm64 runner, since the app links
+# Linux (AppImage) and Windows (single exe) each run on their own native runner;
+# macOS (.dmg) builds natively on an arm64 runner, since the app links
 # FFmpeg/CoreAudio at build time and can't be cross-compiled there. Intel macOS
 # is no longer built (the macos-13 image retired Dec 2025; Apple has dropped
-# x86_64). macOS CI is free because this repo is public (standard runners).
+# x86_64). All runners are free for public repos (no minute cap).
 #
 # Each build job uploads its files as workflow artifacts; a final `release` job
 # collects them and publishes once (so the jobs don't race on the same release).
@@ -22,17 +22,14 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write          # GITHUB_TOKEN needs this to create the release
+  contents: write
 
 jobs:
-  linux-windows:           # one Ubuntu job builds BOTH the Linux AppImage and the cross-compiled Windows bundle
-    runs-on: ubuntu-22.04  # older glibc => the AppImage runs on a wider range of desktops
+  linux:
+    runs-on: ubuntu-22.04  # older glibc => AppImage runs on a wider range of desktops
     steps:
       - uses: actions/checkout@v4
 
-      # The packaging scripts name bundles from $VERSION, falling back to Cargo.toml
-      # when it's unset. On a tag, set it to the tag minus its leading `v` so the
-      # filenames match the release name.
       - name: Derive version from tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
@@ -43,29 +40,89 @@ jobs:
           sudo apt-get install -y \
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            clang pkg-config libasound2-dev \
-            lld llvm p7zip-full zip
-
-      - name: Add Windows target
-        run: rustup target add x86_64-pc-windows-msvc
+            clang pkg-config libasound2-dev
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-xwin
-        run: cargo install cargo-xwin --locked
 
       - name: Build Linux AppImage
         run: ./scripts/make-appimage.sh
 
-      - name: Build Windows bundle
-        run: ./scripts/make-windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: yt-dlp-clipper-*-x86_64.AppImage
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      # MSYS2 UCRT64 provides make/nasm (needed by FFmpeg's build system) and
+      # static codec libs (x264, vpx, opus, lame) that static-ffmpeg links against.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: >-
+            nasm
+            make
+            diffutils
+            mingw-w64-ucrt-x86_64-pkg-config
+            mingw-w64-ucrt-x86_64-x264
+            mingw-w64-ucrt-x86_64-libvpx
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-lame
+
+      - name: Add Rust MinGW target
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Download the two binaries that get baked into the exe via bundle-tools.
+      # yt-dlp: self-contained PyInstaller exe (no Python needed).
+      # ffmpeg: gyan's full_build (statically linked, no DLL deps) — provides the
+      #   ffmpeg CLI that yt-dlp calls to merge video+audio streams at runtime.
+      - name: Download embedded binaries
+        shell: bash
+        run: |
+          mkdir -p build/windows
+          curl -fsSLo build/windows/yt-dlp.exe \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe
+          curl -fsSLo build/windows/ffmpeg.7z \
+            'https://github.com/GyanD/codexffmpeg/releases/download/6.0/ffmpeg-6.0-full_build.7z'
+          7z e -y build/windows/ffmpeg.7z 'ffmpeg-6.0-full_build/bin/ffmpeg.exe' \
+            -obuild/windows/ >/dev/null
+
+      # Build in MSYS2 shell so FFmpeg's configure script can find make/nasm and
+      # pkg-config can resolve the static codec libs from UCRT64.
+      # -C target-feature=+crt-static links libgcc/winpthread statically so the
+      # exe depends only on Windows system DLLs (always present).
+      - name: Build single exe
+        shell: msys2 {0}
+        run: |
+          export PKG_CONFIG_PATH="/ucrt64/lib/pkgconfig"
+          export PKG_CONFIG_ALL_STATIC=1
+          export BUNDLE_YTDLP="$(cygpath -w "$(pwd)/build/windows/yt-dlp.exe")"
+          export BUNDLE_FFMPEG_CLI="$(cygpath -w "$(pwd)/build/windows/ffmpeg.exe")"
+          export RUSTFLAGS="-C target-feature=+crt-static"
+          cargo build --release --target x86_64-pc-windows-gnu \
+            --features bundle-tools
+
+      - name: Stage release exe
+        shell: bash
+        run: |
+          VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
+          cp target/x86_64-pc-windows-gnu/release/yt-dlp-clipper.exe \
+             "yt-dlp-clipper-${VERSION}-win64.exe"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-windows
-          path: |
-            yt-dlp-clipper-*-x86_64.AppImage
-            yt-dlp-clipper-*-win64.zip
+          name: windows
+          path: yt-dlp-clipper-*-win64.exe
 
   macos:
     runs-on: macos-14   # Apple Silicon (arm64) only; Intel macOS dropped (macos-13 image retired Dec 2025)
@@ -91,7 +148,7 @@ jobs:
           path: yt-dlp-clipper-*-macos-*.dmg
 
   release:
-    needs: [linux-windows, macos]
+    needs: [linux, windows, macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

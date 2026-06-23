@@ -1,6 +1,6 @@
 [package]
 name = "yt-dlp-clipper"
-version = "0.1.0"
+version = "0.1.3"
 edition = "2021"
 description = "Pull videos with yt-dlp and trim them frame-accurately"
 
@@ -58,6 +58,14 @@ static-ffmpeg = [
     "ffmpeg-the-third/build-lib-mp3lame",
     "ffmpeg-the-third/build-license-gpl",
 ]
+
+# `bundle-tools` embeds yt-dlp and the ffmpeg CLI binary directly into the exe
+# and extracts them to a per-user managed dir on first run, enabling a true
+# single-file distribution with no companion folders. Implies `static-ffmpeg`
+# so the exe also carries no dynamic libav* dependency. Build with:
+#   BUNDLE_YTDLP=<path> BUNDLE_FFMPEG_CLI=<path> \
+#     cargo build --release --features bundle-tools
+bundle-tools = ["static-ffmpeg"]
 
 [profile.dev]
 # ffmpeg + image decode are painfully slow without some optimization

@@ -29,6 +29,13 @@ fn exe_dir() -> Option<PathBuf> {
 /// thing a user can click to launch.
 const BUNDLED_BIN_SUBDIR: &str = "bin";
 
+// In bundle-tools builds the tool binaries are baked into the exe at compile
+// time and extracted to the managed dir on first run.
+#[cfg(feature = "bundle-tools")]
+const BUNDLED_YTDLP_BYTES: &[u8] = include_bytes!(env!("BUNDLED_YTDLP_PATH"));
+#[cfg(feature = "bundle-tools")]
+const BUNDLED_FFMPEG_CLI_BYTES: &[u8] = include_bytes!(env!("BUNDLED_FFMPEG_CLI_PATH"));
+
 /// Locate a bundled tool binary: the `bin/` subfolder beside the exe first
 /// (the packaged layout), then directly beside the exe (dev `target/` builds
 /// and the AppImage/macOS bundles, which stage tools next to the app).
@@ -68,9 +75,43 @@ fn set_owner_only(path: &Path, mode: u32) {
 #[cfg(not(unix))]
 fn set_owner_only(_path: &Path, _mode: u32) {}
 
+/// Write `bytes` to the managed bin dir under `name`, mark it executable, and
+/// return the path. Used to seed tool binaries embedded at compile time.
+#[cfg(feature = "bundle-tools")]
+fn extract_to_managed(bytes: &[u8], name: &str) -> Option<PathBuf> {
+    let dest = managed_bin_dir()?.join(name);
+    std::fs::write(&dest, bytes).ok()?;
+    set_owner_only(&dest, 0o755);
+    Some(dest)
+}
+
+// Fallbacks for when embedded bytes are available (bundle-tools) or not.
+#[cfg(feature = "bundle-tools")]
+fn embedded_ytdlp() -> Option<PathBuf> {
+    extract_to_managed(BUNDLED_YTDLP_BYTES, YTDLP_EXE)
+}
+#[cfg(not(feature = "bundle-tools"))]
+fn embedded_ytdlp() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(feature = "bundle-tools")]
+fn embedded_ffmpeg_cli() -> Option<PathBuf> {
+    // The managed copy persists between runs; only extract on first use.
+    let managed = managed_bin_dir()?.join(FFMPEG_EXE);
+    if managed.is_file() {
+        return Some(managed);
+    }
+    extract_to_managed(BUNDLED_FFMPEG_CLI_BYTES, FFMPEG_EXE)
+}
+#[cfg(not(feature = "bundle-tools"))]
+fn embedded_ffmpeg_cli() -> Option<PathBuf> {
+    None
+}
+
 /// Resolve yt-dlp to an absolute path, seeding a writable managed copy so
 /// `yt-dlp -U` can update it in place even when the app is installed read-only.
-/// Order: managed copy → bundled (`bin/` or next to exe) → PATH.
+/// Order: managed copy → bundled file (bin/ or next to exe) → PATH → embedded bytes.
 pub(crate) fn resolve_ytdlp() -> Option<PathBuf> {
     let managed = managed_bin_dir().map(|d| d.join(YTDLP_EXE));
     if let Some(m) = &managed {
@@ -78,23 +119,26 @@ pub(crate) fn resolve_ytdlp() -> Option<PathBuf> {
             return Some(m.clone());
         }
     }
-    let source = bundled_binary(YTDLP_EXE).or_else(|| find_in_path(YTDLP_EXE))?;
-    // Seed the managed copy so updates work; if we can't, run the source binary
-    // directly — still by absolute path, never a bare name.
-    match &managed {
-        Some(m) if std::fs::copy(&source, m).is_ok() => {
-            set_owner_only(m, 0o755);
-            Some(m.clone())
-        }
-        _ => Some(source),
+    // Try a file source we can seed from (bundle beside exe, or PATH).
+    if let Some(source) = bundled_binary(YTDLP_EXE).or_else(|| find_in_path(YTDLP_EXE)) {
+        return match &managed {
+            Some(m) if std::fs::copy(&source, m).is_ok() => {
+                set_owner_only(m, 0o755);
+                Some(m.clone())
+            }
+            _ => Some(source),
+        };
     }
+    // No file found; extract from bytes embedded at compile time.
+    embedded_ytdlp()
 }
 
-/// Resolve ffmpeg to an absolute path for `--ffmpeg-location`. No managed copy:
-/// ffmpeg never self-updates, so it needn't live in a writable dir.
-/// Order: bundled (`bin/` or next to exe) → PATH.
+/// Resolve ffmpeg to an absolute path for `--ffmpeg-location`.
+/// Order: bundled file (bin/ or next to exe) → PATH → embedded bytes (managed copy).
 pub(crate) fn resolve_ffmpeg() -> Option<PathBuf> {
-    bundled_binary(FFMPEG_EXE).or_else(|| find_in_path(FFMPEG_EXE))
+    bundled_binary(FFMPEG_EXE)
+        .or_else(|| find_in_path(FFMPEG_EXE))
+        .or_else(embedded_ffmpeg_cli)
 }
 
 /// Total size, in bytes, of the files directly in `dir`.
