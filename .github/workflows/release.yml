@@ -97,7 +97,7 @@ jobs:
         id: ffmpeg-cache
         with:
           path: C:\msys64\ucrt64\custom-ffmpeg
-          key: ffmpeg-6.0-ucrt64-static-${{ hashFiles('.github/workflows/release.yml') }}
+          key: ffmpeg-6.0-ucrt64-static-v2-${{ hashFiles('.github/workflows/release.yml') }}
 
       # Build FFmpeg 6.0 statically in the MSYS2 shell, where ./configure is a
       # real bash script and can run. The Rust build script cannot do this (it runs
@@ -124,7 +124,7 @@ jobs:
             --enable-avformat --enable-swresample --enable-swscale \
             --disable-postproc \
             --enable-libx264 --enable-libvpx --enable-libopus --enable-libmp3lame \
-            --extra-cflags="-I/ucrt64/include" \
+            --extra-cflags="-I/ucrt64/include -fno-tree-vectorize -fno-slp-vectorize" \
             --extra-ldflags="-L/ucrt64/lib" \
             --pkg-config-flags="--static"
           make -j$(nproc)
