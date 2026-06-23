@@ -29,6 +29,21 @@ const RC_UNSET: i32 = -1;
 /// Bitrate for re-encoded audio (MP3/AAC), in bits per second.
 const AUDIO_BITRATE: usize = 192_000;
 
+/// Write the output header, applying `+faststart` for MP4/MOV so the `moov`
+/// atom lands at the front of the file and browsers/chat clients can stream
+/// without downloading the whole file first.
+fn write_header(octx: &mut ffmpeg::format::context::Output, path: &std::path::Path) -> Result<()> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if matches!(ext.as_str(), "mp4" | "mov" | "m4a") {
+        let mut opts = ffmpeg::Dictionary::new();
+        opts.set("movflags", "+faststart");
+        octx.write_header_with(opts)?;
+    } else {
+        octx.write_header()?;
+    }
+    Ok(())
+}
+
 /// Output container for a video export (Full or Clip). Re-encodes target each
 /// container's native codecs: H.264/AAC for MP4·MOV·MKV, VP9/Opus for WebM.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -291,7 +306,7 @@ fn remux_copy(spec: &ExportSpec, cancel: &AtomicBool) -> Result<()> {
         mapping[in_index] = Some((out_stream.index(), in_tb));
     }
 
-    octx.write_header()?;
+    write_header(&mut octx, spec.output.as_ref())?;
 
     let mut packet = ffmpeg::Packet::empty();
     while packet.read(&mut ictx).is_ok() {
@@ -338,7 +353,7 @@ fn export_audio_copy(spec: &ExportSpec, cancel: &AtomicBool) -> Result<()> {
         out_stream.index()
     };
 
-    octx.write_header()?;
+    write_header(&mut octx, spec.output.as_ref())?;
 
     let start_ts = (spec.start_secs / f64::from(in_tb)).round() as i64;
     let end_ts = (spec.end_secs / f64::from(in_tb)).round() as i64;
@@ -398,7 +413,7 @@ fn export_audio_reencode(
         &mut octx, decoder, codec_id, global_header, in_tb, spec.start_secs, spec.end_secs,
     )?;
 
-    octx.write_header()?;
+    write_header(&mut octx, spec.output.as_ref())?;
     reenc.out_tb = octx.stream(reenc.out_index).unwrap().time_base();
 
     // Feed from the seek point (a keyframe at/before the start); `atrim` drops the
@@ -619,6 +634,10 @@ fn open_video_encoder(
         opts.set("crf", VP9_CRF);
         opts.set("cpu-used", VP9_CPU_USED);
         opts.set("deadline", "good");
+        // Row-level MT lets libvpx-vp9 encode rows in parallel; tile-columns
+        // (log2) divides the frame into independently-encodable vertical slices.
+        opts.set("row-mt", "1");
+        opts.set("tile-columns", "2");
     } else {
         // Leave rate-control fields unset so FFmpeg keeps the x264 preset's
         // values instead of forcing defaults libx264 rejects as "broken".
@@ -631,6 +650,8 @@ fn open_video_encoder(
         }
         opts.set("preset", X264_PRESET);
         opts.set("crf", X264_CRF);
+        // 0 = auto-detect; x264 spawns one encode thread per logical CPU.
+        opts.set("threads", "0");
     }
     let encoder = enc.open_as_with(codec, opts)?;
     v_out.set_parameters(&encoder);
@@ -898,7 +919,7 @@ fn transcode(spec: &ExportSpec, container: Container, clip: bool, cancel: &Atomi
         }
     }
 
-    octx.write_header()?;
+    write_header(&mut octx, spec.output.as_ref())?;
     if let Some(ar) = a_reenc.as_mut() {
         ar.out_tb = octx.stream(ar.out_index).unwrap().time_base();
     }
