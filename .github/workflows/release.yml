@@ -110,6 +110,11 @@ jobs:
           export BUNDLE_YTDLP="$(cygpath -w "$(pwd)/build/windows/yt-dlp.exe")"
           export BUNDLE_FFMPEG_CLI="$(cygpath -w "$(pwd)/build/windows/ffmpeg.exe")"
           export RUSTFLAGS="-C target-feature=+crt-static"
+          # The cc crate looks for x86_64-w64-mingw32-gcc by default; in UCRT64
+          # the native compiler is just gcc, so point it there explicitly.
+          export CC_x86_64_pc_windows_gnu=gcc
+          export CXX_x86_64_pc_windows_gnu=g++
+          export AR_x86_64_pc_windows_gnu=ar
           cargo build --release --target x86_64-pc-windows-gnu \
             --features bundle-tools
 
