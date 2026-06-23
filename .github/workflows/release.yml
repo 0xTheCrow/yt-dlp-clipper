@@ -162,18 +162,8 @@ jobs:
           test -f "$PREFIX/lib/libmp3lame.a"
           if ! test -f "$PREFIX/lib/pkgconfig/libmp3lame.pc"; then
             mkdir -p "$PREFIX/lib/pkgconfig"
-            cat > "$PREFIX/lib/pkgconfig/libmp3lame.pc" <<'PKGEOF'
-prefix=/opt/win-libs
-exec_prefix=${prefix}
-libdir=${exec_prefix}/lib
-includedir=${prefix}/include
-
-Name: libmp3lame
-Description: LAME MP3 encoding library
-Version: 3.100
-Libs: -L${libdir} -lmp3lame
-Cflags: -I${includedir}
-PKGEOF
+            printf 'prefix=%s\nexec_prefix=${prefix}\nlibdir=${exec_prefix}/lib\nincludedir=${prefix}/include\n\nName: libmp3lame\nDescription: LAME MP3 encoding library\nVersion: 3.100\nLibs: -L${libdir} -lmp3lame\nCflags: -I${includedir}\n' \
+              "$PREFIX" > "$PREFIX/lib/pkgconfig/libmp3lame.pc"
           fi
           test -f "$PREFIX/lib/pkgconfig/libmp3lame.pc"
 
