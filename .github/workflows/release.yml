@@ -155,11 +155,27 @@ jobs:
             --enable-static --disable-shared \
             --disable-frontend --disable-gtktest && \
             make -j$(nproc) && make install)
-          # libtool cross-compile sometimes skips installing the .a; copy manually
+          # libtool cross-compile sometimes skips installing the .a and .pc; fix both
           if ! test -f "$PREFIX/lib/libmp3lame.a"; then
             find build/lame-src -name 'libmp3lame.a' -exec cp {} "$PREFIX/lib/" \;
           fi
           test -f "$PREFIX/lib/libmp3lame.a"
+          if ! test -f "$PREFIX/lib/pkgconfig/libmp3lame.pc"; then
+            mkdir -p "$PREFIX/lib/pkgconfig"
+            cat > "$PREFIX/lib/pkgconfig/libmp3lame.pc" <<'PKGEOF'
+prefix=/opt/win-libs
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libmp3lame
+Description: LAME MP3 encoding library
+Version: 3.100
+Libs: -L${libdir} -lmp3lame
+Cflags: -I${includedir}
+PKGEOF
+          fi
+          test -f "$PREFIX/lib/pkgconfig/libmp3lame.pc"
 
           # FFmpeg 6.0
           mkdir -p build/ffmpeg-src
@@ -185,6 +201,7 @@ jobs:
               --enable-libopus --enable-libmp3lame \
               --extra-cflags="-I$PREFIX/include" \
               --extra-ldflags="-L$PREFIX/lib" \
+              --pkg-config=pkg-config \
               --pkg-config-flags="--static" && \
             make -j$(nproc) && make install)
 
