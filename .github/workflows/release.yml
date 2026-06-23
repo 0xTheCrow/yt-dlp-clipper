@@ -62,8 +62,8 @@ jobs:
         shell: bash
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      # MSYS2 UCRT64 provides make/nasm (needed by FFmpeg's build system) and
-      # static codec libs (x264, vpx, opus, lame) that static-ffmpeg links against.
+      # MSYS2 UCRT64 provides: make/nasm (FFmpeg's build system), clang/libclang
+      # (bindgen), and static codec libs (x264, vpx, opus, lame) that FFmpeg links.
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -81,8 +81,8 @@ jobs:
 
       # Install the GNU Rust toolchain and make it the default so HOST == TARGET
       # (both x86_64-pc-windows-gnu). ffmpeg-sys-the-third's build script has a
-      # HOST != TARGET branch that assumes a cross-compiler prefix like
-      # "x86_64-w64-mingw32-gcc"; skipping that branch avoids a panic on rfind('-').
+      # HOST != TARGET branch that panics when the C compiler name has no hyphen
+      # (e.g. bare "gcc"); skipping that branch by keeping HOST == TARGET avoids it.
       - name: Install MinGW Rust toolchain
         run: |
           rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update
@@ -90,10 +90,50 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Download the two binaries that get baked into the exe via bundle-tools.
-      # yt-dlp: self-contained PyInstaller exe (no Python needed).
-      # ffmpeg: gyan's full_build (statically linked, no DLL deps) — provides the
-      #   ffmpeg CLI that yt-dlp calls to merge video+audio streams at runtime.
+      # Cache the static FFmpeg install so repeated CI runs skip the 10-15 min build.
+      # Key includes the workflow file hash; bump v1 manually if configure flags change.
+      - name: Cache static FFmpeg 6.0
+        uses: actions/cache@v4
+        id: ffmpeg-cache
+        with:
+          path: C:\msys64\ucrt64\custom-ffmpeg
+          key: ffmpeg-6.0-ucrt64-static-${{ hashFiles('.github/workflows/release.yml') }}
+
+      # Build FFmpeg 6.0 statically in the MSYS2 shell, where ./configure is a
+      # real bash script and can run. The Rust build script cannot do this (it runs
+      # as a Windows process and can't exec a shell script directly — that's why
+      # static-ffmpeg / ffmpeg-the-third/build can't be used on Windows).
+      # We only enable the codecs the app actually uses; --disable-autodetect keeps
+      # everything else off so there are no surprise system-library dependencies.
+      - name: Build static FFmpeg 6.0
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: |
+          mkdir -p build/ffmpeg-src
+          curl -fsSL https://ffmpeg.org/releases/ffmpeg-6.0.tar.bz2 \
+            | tar xj -C build/ffmpeg-src --strip-components=1
+          cd build/ffmpeg-src
+          ./configure \
+            --prefix=/ucrt64/custom-ffmpeg \
+            --target-os=mingw32 \
+            --enable-static --disable-shared \
+            --enable-gpl \
+            --disable-autodetect \
+            --disable-programs --disable-doc \
+            --enable-avcodec --enable-avdevice --enable-avfilter \
+            --enable-avformat --enable-swresample --enable-swscale \
+            --disable-postproc \
+            --enable-libx264 --enable-libvpx --enable-libopus --enable-libmp3lame \
+            --extra-cflags="-I/ucrt64/include" \
+            --extra-ldflags="-L/ucrt64/lib" \
+            --pkg-config-flags="--static"
+          make -j$(nproc)
+          make install
+
+      # Download the two binaries baked into the exe by the bundle-tools feature.
+      # yt-dlp: self-contained PyInstaller exe (no Python dependency).
+      # ffmpeg CLI: gyan's full_build static exe — the runtime tool yt-dlp calls to
+      #   merge video+audio streams; separate from the libav* we link at build time.
       - name: Download embedded binaries
         shell: bash
         run: |
@@ -105,23 +145,22 @@ jobs:
           7z e -y build/windows/ffmpeg.7z 'ffmpeg-6.0-full_build/bin/ffmpeg.exe' \
             -obuild/windows/ >/dev/null
 
-      # Build in MSYS2 shell so FFmpeg's configure script can find make/nasm and
-      # pkg-config can resolve the static codec libs from UCRT64.
-      # -C target-feature=+crt-static links libgcc/winpthread statically so the
-      # exe depends only on Windows system DLLs (always present).
+      # FFMPEG_DIR (Windows path) → ffmpeg-sys-the-third's FFMPEG_DIR path: links
+      #   the static libav* from our pre-built install and finds the headers there.
+      #   No ./configure is invoked — just a link-search + include-path setup.
+      # CODEC_LIB_DIR (Windows path) → our build.rs emits a link-search for the
+      #   codec .a files (x264, vpx, opus, mp3lame) that libav* depends on.
+      # LIBCLANG_PATH → where bindgen finds libclang.dll for header parsing.
+      # +crt-static → links libgcc/winpthread statically; exe needs only Windows DLLs.
       - name: Build single exe
         shell: msys2 {0}
         run: |
-          # Convert POSIX paths to Windows paths so Windows-native tools
-          # (pkg-config, libclang) can find them when invoked by build scripts.
-          export PKG_CONFIG_PATH="$(cygpath -w /ucrt64/lib/pkgconfig)"
-          export PKG_CONFIG_ALL_STATIC=1
+          export FFMPEG_DIR="$(cygpath -w /ucrt64/custom-ffmpeg)"
+          export CODEC_LIB_DIR="$(cygpath -w /ucrt64/lib)"
           export LIBCLANG_PATH="$(cygpath -w /ucrt64/bin)"
           export BUNDLE_YTDLP="$(cygpath -w "$(pwd)/build/windows/yt-dlp.exe")"
           export BUNDLE_FFMPEG_CLI="$(cygpath -w "$(pwd)/build/windows/ffmpeg.exe")"
           export RUSTFLAGS="-C target-feature=+crt-static"
-          # The cc crate looks for x86_64-w64-mingw32-gcc by default; in UCRT64
-          # the native compiler is just gcc, so point it there explicitly.
           export CC_x86_64_pc_windows_gnu=gcc
           export CXX_x86_64_pc_windows_gnu=g++
           export AR_x86_64_pc_windows_gnu=ar

@@ -5,6 +5,25 @@ fn main() {
         let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
         embed("BUNDLE_YTDLP", "BUNDLED_YTDLP_PATH", "bundled-ytdlp", &out);
         embed("BUNDLE_FFMPEG_CLI", "BUNDLED_FFMPEG_CLI_PATH", "bundled-ffmpeg-cli", &out);
+
+        // On Windows the ffmpeg-sys-the-third build script (FFMPEG_DIR path) emits
+        // only the libav* link flags. The codec libs statically compiled into
+        // FFmpeg (and their Windows system deps) must be listed here so the linker
+        // can resolve their symbols when it encounters them inside the libav* .a files.
+        if cfg!(windows) {
+            println!("cargo:rerun-if-env-changed=CODEC_LIB_DIR");
+            let codec_lib_dir = env::var("CODEC_LIB_DIR").unwrap_or_else(|_| {
+                panic!("CODEC_LIB_DIR must be set when building bundle-tools on Windows")
+            });
+            println!("cargo:rustc-link-search=native={codec_lib_dir}");
+            for lib in ["x264", "vpx", "opus", "mp3lame"] {
+                println!("cargo:rustc-link-lib=static={lib}");
+            }
+            // Windows system libs that FFmpeg depends on.
+            for lib in ["bcrypt", "ws2_32", "secur32", "ole32", "user32"] {
+                println!("cargo:rustc-link-lib={lib}");
+            }
+        }
     }
 }
 

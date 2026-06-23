@@ -59,13 +59,16 @@ static-ffmpeg = [
     "ffmpeg-the-third/build-license-gpl",
 ]
 
-# `bundle-tools` embeds yt-dlp and the ffmpeg CLI binary directly into the exe
-# and extracts them to a per-user managed dir on first run, enabling a true
-# single-file distribution with no companion folders. Implies `static-ffmpeg`
-# so the exe also carries no dynamic libav* dependency. Build with:
-#   BUNDLE_YTDLP=<path> BUNDLE_FFMPEG_CLI=<path> \
+# `bundle-tools` embeds yt-dlp and the ffmpeg CLI binary into the exe and
+# extracts them to a per-user managed dir on first run (true single-file
+# distribution). Enables static FFmpeg linking but does NOT build FFmpeg from
+# source (that's static-ffmpeg, which runs ./configure — Linux/macOS only).
+# The CI pre-builds a static FFmpeg 6.0 in an MSYS2 shell where configure works,
+# then sets FFMPEG_DIR + CODEC_LIB_DIR so the Rust build links against it.
+# Build with:
+#   BUNDLE_YTDLP=<path> BUNDLE_FFMPEG_CLI=<path> FFMPEG_DIR=<path> CODEC_LIB_DIR=<path> \
 #     cargo build --release --features bundle-tools
-bundle-tools = ["static-ffmpeg"]
+bundle-tools = ["ffmpeg-the-third/static"]
 
 [profile.dev]
 # ffmpeg + image decode are painfully slow without some optimization
