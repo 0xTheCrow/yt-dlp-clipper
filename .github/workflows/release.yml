@@ -191,9 +191,9 @@ jobs:
               --enable-gpl \
               --disable-autodetect \
               --disable-programs --disable-doc \
-              --enable-avcodec --enable-avdevice --enable-avfilter \
+              --enable-avcodec --enable-avfilter \
               --enable-avformat --enable-swresample --enable-swscale \
-              --disable-postproc \
+              --disable-avdevice --disable-postproc \
               --enable-libx264 --enable-libvpx \
               --enable-libopus --enable-libmp3lame \
               --extra-cflags="-I$PREFIX/include" \

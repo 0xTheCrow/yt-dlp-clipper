@@ -17,7 +17,17 @@ egui_extras = { version = "0.29", features = ["svg"] }
 
 # FFmpeg bindings (links libav*). 1.2 supports a wide FFmpeg range incl. 4.4.
 # Bump this once you upgrade FFmpeg (2.x => FFmpeg 7).
-ffmpeg-the-third = "1.2"
+# Drop the default `device` (avdevice) feature: the app decodes/encodes files and
+# never opens a capture device, and on Windows avdevice drags in the whole
+# dshow/vfw/MediaFoundation system-lib web at static-link time.
+ffmpeg-the-third = { version = "1.2", default-features = false, features = [
+    "codec",
+    "filter",
+    "format",
+    "software-resampling",
+    "software-scaling",
+    "non-exhaustive-enums",
+] }
 
 # native file open/save dialogs
 rfd = "0.15"
