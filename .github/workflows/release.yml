@@ -167,10 +167,28 @@ jobs:
           fi
           test -f "$PREFIX/lib/pkgconfig/libmp3lame.pc"
 
+          # Verify the codec libs are discoverable and built for the Windows
+          # target before FFmpeg's configure consumes them. FFmpeg reports both
+          # "no .pc found" and "link test failed" as the same opaque "X not found
+          # using pkg-config", so confirm discovery (pkg-config) and architecture
+          # (the .a must be PE/COFF, not host ELF) here where the cause is clear.
+          echo "== pkgconfig dir =="
+          ls -la "$PREFIX/lib/pkgconfig"
+          for pc in x264 vpx opus; do
+            PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" PKG_CONFIG_PATH="" \
+              pkg-config --exists --print-errors "$pc" \
+              && echo "$pc: pkg-config OK" || echo "$pc: pkg-config FAILED"
+          done
+          for a in libx264 libvpx libopus libmp3lame; do
+            echo "== $a.a =="; file "$PREFIX/lib/$a.a" | head -1
+          done
+
           # FFmpeg 6.0
           mkdir -p build/ffmpeg-src
           curl -fsSL https://ffmpeg.org/releases/ffmpeg-6.0.tar.bz2 \
             | tar xj --strip-components=1 -C build/ffmpeg-src
+          # Dump config.log on configure failure; its tail holds the real compiler
+          # / pkg-config error behind FFmpeg's generic "not found" message.
           (cd build/ffmpeg-src && \
             PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" \
             PKG_CONFIG_PATH="" \
@@ -192,8 +210,10 @@ jobs:
               --extra-cflags="-I$PREFIX/include" \
               --extra-ldflags="-L$PREFIX/lib" \
               --pkg-config=pkg-config \
-              --pkg-config-flags="--static" && \
-            make -j$(nproc) && make install)
+              --pkg-config-flags="--static") \
+            || { echo "== ffbuild/config.log (tail) =="; \
+                 tail -n 120 build/ffmpeg-src/ffbuild/config.log; exit 1; }
+          (cd build/ffmpeg-src && make -j$(nproc) && make install)
 
       # yt-dlp: self-contained PyInstaller exe (no Python dependency).
       # ffmpeg CLI: gyan full_build static exe — the runtime binary yt-dlp calls
