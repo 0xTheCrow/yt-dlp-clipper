@@ -77,6 +77,12 @@ jobs:
       - name: Add Rust MSVC target
         run: rustup target add x86_64-pc-windows-msvc
 
+      # Activate the MSVC environment (sets INCLUDE/LIB/PATH) so ffmpeg-sys-the-
+      # third's bindgen pass can find the MSVC + Windows SDK system headers; clang
+      # reads the system include dirs from INCLUDE on the MSVC target.
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: x86_64-pc-windows-msvc
