@@ -73,10 +73,10 @@ static-ffmpeg = [
 # extracts them to a per-user managed dir on first run (true single-file
 # distribution). Enables static FFmpeg linking but does NOT build FFmpeg from
 # source (that's static-ffmpeg, which runs ./configure — Linux/macOS only).
-# The CI pre-builds a static FFmpeg 6.0 in an MSYS2 shell where configure works,
-# then sets FFMPEG_DIR + CODEC_LIB_DIR so the Rust build links against it.
+# The Windows CI provides static libav* + codecs via vcpkg (x64-windows-static);
+# ffmpeg-sys-the-third's vcpkg path links them and adds the Windows system libs.
 # Build with:
-#   BUNDLE_YTDLP=<path> BUNDLE_FFMPEG_CLI=<path> FFMPEG_DIR=<path> CODEC_LIB_DIR=<path> \
+#   BUNDLE_YTDLP=<path> BUNDLE_FFMPEG_CLI=<path> VCPKG_ROOT=<path> VCPKGRS_TRIPLET=x64-windows-static \
 #     cargo build --release --features bundle-tools
 bundle-tools = ["ffmpeg-the-third/static"]
 

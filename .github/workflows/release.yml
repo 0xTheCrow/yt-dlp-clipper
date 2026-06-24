@@ -53,198 +53,81 @@ jobs:
           path: yt-dlp-clipper-*-x86_64.AppImage
 
   windows:
-    # Cross-compile the Windows exe from Linux. FFmpeg's configure is a bash
-    # script that runs cleanly on Linux with a MinGW cross-compiler; the MSYS2
-    # POSIX-shell-on-Windows approach hits configure's cross-compile detection
-    # every time and was never reliable. The GNU Windows target cross-compiles
-    # from Linux with no special tooling required.
-    runs-on: ubuntu-22.04
+    # Build the single self-contained exe natively on Windows with the MSVC
+    # toolchain. Static FFmpeg + codecs come from vcpkg (x64-windows-static);
+    # ffmpeg-sys-the-third's vcpkg path links libav* + x264/vpx/opus/mp3lame and
+    # adds the Windows system libs itself. MSVC's linker resolves order-
+    # independently, so none of the MinGW cross-compile pitfalls (GNU ld single-
+    # pass ordering, _FORTIFY_SOURCE/libssp, hand-maintained transitive deps)
+    # apply. `+crt-static` links the CRT statically, so the exe needs no VCRedist.
+    runs-on: windows-2022
+    env:
+      VCPKG_ROOT: C:\vcpkg
+      # vcpkg writes built package archives here; caching this dir makes repeat
+      # runs skip the (slow) FFmpeg compile.
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
     steps:
       - uses: actions/checkout@v4
 
       - name: Derive version from tag
         if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      - name: Install cross-compile toolchain
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y \
-            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
-            nasm make pkg-config \
-            clang libclang-dev \
-            p7zip-full
-
-      - name: Add Rust Windows GNU target
-        run: rustup target add x86_64-pc-windows-gnu
+      - name: Add Rust MSVC target
+        run: rustup target add x86_64-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: x86_64-pc-windows-gnu
+          key: x86_64-pc-windows-msvc
 
-      # Cache the full codec+FFmpeg static lib tree. Key covers the workflow so
-      # any configure-flag change automatically invalidates it.
-      - name: Cache Windows FFmpeg + codec static libs
+      - name: Cache vcpkg binary archives
         uses: actions/cache@v4
-        id: ffmpeg-cache
         with:
-          path: /opt/win-libs
-          key: win-cross-ffmpeg-6.0-v2-${{ hashFiles('.github/workflows/release.yml') }}
+          path: ${{ github.workspace }}\vcpkg-cache
+          key: vcpkg-ffmpeg-static-v1-${{ hashFiles('.github/workflows/release.yml') }}
 
-      # Build static Windows libs via cross-compiler. Each codec is configured
-      # with --host=x86_64-w64-mingw32 and installed into the shared prefix so
-      # FFmpeg's configure finds them via PKG_CONFIG_LIBDIR.
-      # Cross tools are set explicitly (CC/AR/RANLIB) because libtool sometimes
-      # ignores --host when the cross-compiler isn't the only thing in PATH.
-      - name: Build Windows codec + FFmpeg static libs
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+      # GPL build: x264 (the only H.264 encoder) makes the binary GPL — accepted.
+      - name: Build static FFmpeg via vcpkg
+        shell: pwsh
         run: |
-          set -euo pipefail
-          PREFIX=/opt/win-libs
-          CROSS=x86_64-w64-mingw32
-          export CC=$CROSS-gcc
-          export CXX=$CROSS-g++
-          export AR=$CROSS-ar
-          export RANLIB=$CROSS-ranlib
-          export STRIP=$CROSS-strip
-          export NM=$CROSS-nm
-          mkdir -p build "$PREFIX"
-
-          # x264
-          git clone --depth 1 https://code.videolan.org/videolan/x264.git build/x264
-          (cd build/x264 && ./configure \
-            --host=$CROSS --cross-prefix=$CROSS- \
-            --prefix=$PREFIX \
-            --enable-static --disable-shared --disable-cli && \
-            make -j$(nproc) && make install)
-          test -f "$PREFIX/lib/libx264.a"
-
-          # libvpx — uses CROSS env var for the binary prefix, not --host
-          git clone --depth 1 https://github.com/webmproject/libvpx build/libvpx
-          (cd build/libvpx && \
-            CROSS=$CROSS- ./configure \
-            --target=x86_64-win64-gcc \
-            --prefix=$PREFIX \
-            --enable-static --disable-shared \
-            --disable-unit-tests --disable-examples --disable-docs && \
-            make -j$(nproc) && make install)
-          test -f "$PREFIX/lib/libvpx.a"
-
-          # opus 1.3.1 — use --strip-components=1 to avoid depending on tarball
-          # directory name; 1.3.1 is a stable release with configure pre-generated
-          mkdir -p build/opus-src
-          curl -fsSL https://downloads.xiph.org/releases/opus/opus-1.3.1.tar.gz \
-            | tar xz --strip-components=1 -C build/opus-src
-          (cd build/opus-src && ./configure \
-            --host=$CROSS \
-            --prefix=$PREFIX \
-            --enable-static --disable-shared \
-            --disable-doc --disable-extra-programs && \
-            make -j$(nproc) && make install)
-          test -f "$PREFIX/lib/libopus.a"
-
-          # mp3lame — strip-components=1 for robustness; explicitly pass cross
-          # tools because lame's libtool otherwise silently installs nothing
-          mkdir -p build/lame-src
-          curl -fsSL \
-            https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz \
-            | tar xz --strip-components=1 -C build/lame-src
-          (cd build/lame-src && ./configure \
-            --host=$CROSS \
-            --prefix=$PREFIX \
-            --enable-static --disable-shared \
-            --disable-frontend --disable-gtktest && \
-            make -j$(nproc) && make install)
-          # libtool cross-compile sometimes skips installing the .a and .pc; fix both
-          if ! test -f "$PREFIX/lib/libmp3lame.a"; then
-            find build/lame-src -name 'libmp3lame.a' -exec cp {} "$PREFIX/lib/" \;
-          fi
-          test -f "$PREFIX/lib/libmp3lame.a"
-          if ! test -f "$PREFIX/lib/pkgconfig/libmp3lame.pc"; then
-            mkdir -p "$PREFIX/lib/pkgconfig"
-            printf 'prefix=%s\nexec_prefix=${prefix}\nlibdir=${exec_prefix}/lib\nincludedir=${prefix}/include\n\nName: libmp3lame\nDescription: LAME MP3 encoding library\nVersion: 3.100\nLibs: -L${libdir} -lmp3lame\nCflags: -I${includedir}\n' \
-              "$PREFIX" > "$PREFIX/lib/pkgconfig/libmp3lame.pc"
-          fi
-          test -f "$PREFIX/lib/pkgconfig/libmp3lame.pc"
-
-          # FFmpeg 6.0
-          mkdir -p build/ffmpeg-src
-          curl -fsSL https://ffmpeg.org/releases/ffmpeg-6.0.tar.bz2 \
-            | tar xj --strip-components=1 -C build/ffmpeg-src
-          # --extra-libs=-lssp: Ubuntu's mingw-w64 gcc defaults _FORTIFY_SOURCE on,
-          # so headers redirect e.g. memcpy to __memcpy_chk (a libssp symbol the gcc
-          # driver does not auto-link on MinGW). Without it the libopus pkg-config
-          # check fails its link test with an undefined __memcpy_chk; build.rs links
-          # libssp the same way for the final exe.
-          # Dump config.log on configure failure; its tail holds the real compiler
-          # / pkg-config error behind FFmpeg's generic "not found" message.
-          (cd build/ffmpeg-src && \
-            PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" \
-            PKG_CONFIG_PATH="" \
-            ./configure \
-              --prefix=$PREFIX \
-              --enable-cross-compile \
-              --arch=x86_64 \
-              --target-os=mingw32 \
-              --cross-prefix=$CROSS- \
-              --enable-static --disable-shared \
-              --enable-gpl \
-              --disable-autodetect \
-              --disable-programs --disable-doc \
-              --enable-avcodec --enable-avfilter \
-              --enable-avformat --enable-swresample --enable-swscale \
-              --disable-avdevice --disable-postproc \
-              --enable-libx264 --enable-libvpx \
-              --enable-libopus --enable-libmp3lame \
-              --extra-cflags="-I$PREFIX/include" \
-              --extra-ldflags="-L$PREFIX/lib" \
-              --extra-libs="-lssp" \
-              --pkg-config=pkg-config \
-              --pkg-config-flags="--static") \
-            || { echo "== ffbuild/config.log (tail) =="; \
-                 tail -n 120 build/ffmpeg-src/ffbuild/config.log; exit 1; }
-          (cd build/ffmpeg-src && make -j$(nproc) && make install)
+          New-Item -ItemType Directory -Force -Path "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
+          & "$env:VCPKG_ROOT\vcpkg.exe" install `
+            "ffmpeg[avcodec,avformat,avfilter,swscale,swresample,gpl,x264,vpx,opus,mp3lame]:x64-windows-static"
 
       # yt-dlp: self-contained PyInstaller exe (no Python dependency).
       # ffmpeg CLI: gyan full_build static exe — the runtime binary yt-dlp calls
       #   to merge streams; separate from the libav* we link at build time.
-      - name: Download embedded binaries
+      - name: Download embedded tool binaries
+        shell: pwsh
         run: |
-          mkdir -p build/windows
-          curl -fsSLo build/windows/yt-dlp.exe \
-            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe
-          curl -fsSLo build/windows/ffmpeg.7z \
-            'https://github.com/GyanD/codexffmpeg/releases/download/6.0/ffmpeg-6.0-full_build.7z'
-          7z e -y build/windows/ffmpeg.7z 'ffmpeg-6.0-full_build/bin/ffmpeg.exe' \
-            -obuild/windows/ >/dev/null
+          New-Item -ItemType Directory -Force -Path build\windows | Out-Null
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe `
+            -OutFile build\windows\yt-dlp.exe
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri https://github.com/GyanD/codexffmpeg/releases/download/6.0/ffmpeg-6.0-full_build.7z `
+            -OutFile build\windows\ffmpeg.7z
+          7z e -y build\windows\ffmpeg.7z "ffmpeg-6.0-full_build/bin/ffmpeg.exe" -obuild\windows\
 
-      # FFMPEG_DIR → ffmpeg-sys-the-third uses this to find headers + static libav*.
-      # CODEC_LIB_DIR → build.rs adds this search path and links x264/vpx/opus/lame.
-      # BINDGEN_EXTRA_CLANG_ARGS → clang needs the MinGW Windows headers when
-      #   generating FFI bindings for the Windows target from a Linux host.
-      # +crt-static → links libgcc/winpthread statically; exe needs only Windows DLLs.
+      # VCPKGRS_TRIPLET → make the vcpkg crate use the static triplet we built.
+      # +crt-static → static CRT, matching x64-windows-static, so no VCRedist dep.
+      # LIBCLANG_PATH → libclang for ffmpeg-sys-the-third's bindgen pass.
       - name: Build Windows exe
+        shell: pwsh
         env:
-          FFMPEG_DIR: /opt/win-libs
-          CODEC_LIB_DIR: /opt/win-libs/lib
-          BUNDLE_YTDLP: ${{ github.workspace }}/build/windows/yt-dlp.exe
-          BUNDLE_FFMPEG_CLI: ${{ github.workspace }}/build/windows/ffmpeg.exe
-          CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
-          CXX_x86_64_pc_windows_gnu: x86_64-w64-mingw32-g++
-          AR_x86_64_pc_windows_gnu: x86_64-w64-mingw32-ar
-          BINDGEN_EXTRA_CLANG_ARGS: >-
-            --target=x86_64-w64-windows-gnu
-            -I/usr/x86_64-w64-mingw32/include
+          VCPKGRS_TRIPLET: x64-windows-static
           RUSTFLAGS: -C target-feature=+crt-static
-        run: |
-          cargo build --release \
-            --target x86_64-pc-windows-gnu \
-            --features bundle-tools
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+          BUNDLE_YTDLP: ${{ github.workspace }}\build\windows\yt-dlp.exe
+          BUNDLE_FFMPEG_CLI: ${{ github.workspace }}\build\windows\ffmpeg.exe
+        run: cargo build --release --target x86_64-pc-windows-msvc --features bundle-tools
 
       - name: Stage release exe
+        shell: bash
         run: |
           VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
-          cp target/x86_64-pc-windows-gnu/release/yt-dlp-clipper.exe \
+          cp target/x86_64-pc-windows-msvc/release/yt-dlp-clipper.exe \
              "yt-dlp-clipper-${VERSION}-win64.exe"
 
       - uses: actions/upload-artifact@v4
