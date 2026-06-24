@@ -62,7 +62,6 @@ jobs:
     # apply. `+crt-static` links the CRT statically, so the exe needs no VCRedist.
     runs-on: windows-2022
     env:
-      VCPKG_ROOT: C:\vcpkg
       # vcpkg writes built package archives here; caching this dir makes repeat
       # runs skip the (slow) FFmpeg compile.
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
@@ -94,11 +93,14 @@ jobs:
           key: vcpkg-ffmpeg-static-v1-${{ hashFiles('.github/workflows/release.yml') }}
 
       # GPL build: x264 (the only H.264 encoder) makes the binary GPL — accepted.
+      # Use the standalone C:\vcpkg by absolute path: the MSVC dev-cmd step exports
+      # VCPKG_ROOT pointing at the VS-bundled vcpkg, which is manifest-mode-only and
+      # rejects classic-mode `vcpkg install`.
       - name: Build static FFmpeg via vcpkg
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
-          & "$env:VCPKG_ROOT\vcpkg.exe" install `
+          & "C:\vcpkg\vcpkg.exe" install `
             "ffmpeg[avcodec,avformat,avfilter,swscale,swresample,gpl,x264,vpx,opus,mp3lame]:x64-windows-static"
 
       # yt-dlp: self-contained PyInstaller exe (no Python dependency).
@@ -116,12 +118,15 @@ jobs:
             -OutFile build\windows\ffmpeg.7z
           7z e -y build\windows\ffmpeg.7z "ffmpeg-6.0-full_build/bin/ffmpeg.exe" -obuild\windows\
 
+      # VCPKG_ROOT → the vcpkg crate reads the installed tree from here; pin it to
+      #   the standalone C:\vcpkg (the dev-cmd step pointed it at the VS-bundled one).
       # VCPKGRS_TRIPLET → make the vcpkg crate use the static triplet we built.
       # +crt-static → static CRT, matching x64-windows-static, so no VCRedist dep.
       # LIBCLANG_PATH → libclang for ffmpeg-sys-the-third's bindgen pass.
       - name: Build Windows exe
         shell: pwsh
         env:
+          VCPKG_ROOT: C:\vcpkg
           VCPKGRS_TRIPLET: x64-windows-static
           RUSTFLAGS: -C target-feature=+crt-static
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
