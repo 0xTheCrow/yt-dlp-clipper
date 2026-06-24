@@ -30,11 +30,31 @@ fn main() {
             // Ubuntu's mingw-w64 gcc defaults _FORTIFY_SOURCE on, so the codec and
             // libav* objects reference fortify/stack-protector symbols (__memcpy_chk,
             // __stack_chk_fail) from libssp, which the gcc driver does not auto-link
-            // on MinGW. Emit it last so it resolves those references from every
-            // preceding archive.
+            // on MinGW. libssp.a lives in the gcc sysroot, which rustc's static-lib
+            // search doesn't know; ask the cross-compiler for its directory. Emit it
+            // last so it resolves those references from every preceding archive.
+            if let Some(dir) = mingw_libssp_dir() {
+                println!("cargo:rustc-link-search=native={dir}");
+            }
             println!("cargo:rustc-link-lib=static=ssp");
         }
     }
+}
+
+/// Directory holding `libssp.a` in the mingw-w64 cross toolchain, queried from
+/// the C compiler (`-print-file-name` returns the bare name if it can't locate
+/// the lib, so only accept an absolute path).
+fn mingw_libssp_dir() -> Option<String> {
+    let cc = env::var("CC_x86_64_pc_windows_gnu")
+        .unwrap_or_else(|_| "x86_64-w64-mingw32-gcc".into());
+    let out = std::process::Command::new(cc)
+        .arg("-print-file-name=libssp.a")
+        .output()
+        .ok()?;
+    let path = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+    path.is_absolute()
+        .then(|| path.parent().map(|p| p.display().to_string()))
+        .flatten()
 }
 
 fn embed(src_env: &str, rustc_env: &str, dest_name: &str, out: &std::path::Path) {
