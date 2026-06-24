@@ -27,6 +27,12 @@ fn main() {
             for lib in ["bcrypt", "ws2_32", "secur32", "ole32", "user32"] {
                 println!("cargo:rustc-link-lib={lib}");
             }
+            // Ubuntu's mingw-w64 gcc defaults _FORTIFY_SOURCE on, so the codec and
+            // libav* objects reference fortify/stack-protector symbols (__memcpy_chk,
+            // __stack_chk_fail) from libssp, which the gcc driver does not auto-link
+            // on MinGW. Emit it last so it resolves those references from every
+            // preceding archive.
+            println!("cargo:rustc-link-lib=static=ssp");
         }
     }
 }

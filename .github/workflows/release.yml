@@ -131,11 +131,7 @@ jobs:
           test -f "$PREFIX/lib/libvpx.a"
 
           # opus 1.3.1 — use --strip-components=1 to avoid depending on tarball
-          # directory name; 1.3.1 is a stable release with configure pre-generated.
-          # --disable-hardening: opus enables _FORTIFY_SOURCE=2 by default, which
-          # makes MinGW's string.h redirect memcpy to __memcpy_chk (a libssp
-          # symbol not linked by FFmpeg's pkg-config test or our final exe link),
-          # so the libopus check fails with an undefined __memcpy_chk reference.
+          # directory name; 1.3.1 is a stable release with configure pre-generated
           mkdir -p build/opus-src
           curl -fsSL https://downloads.xiph.org/releases/opus/opus-1.3.1.tar.gz \
             | tar xz --strip-components=1 -C build/opus-src
@@ -143,7 +139,6 @@ jobs:
             --host=$CROSS \
             --prefix=$PREFIX \
             --enable-static --disable-shared \
-            --disable-hardening \
             --disable-doc --disable-extra-programs && \
             make -j$(nproc) && make install)
           test -f "$PREFIX/lib/libopus.a"
@@ -176,6 +171,11 @@ jobs:
           mkdir -p build/ffmpeg-src
           curl -fsSL https://ffmpeg.org/releases/ffmpeg-6.0.tar.bz2 \
             | tar xj --strip-components=1 -C build/ffmpeg-src
+          # --extra-libs=-lssp: Ubuntu's mingw-w64 gcc defaults _FORTIFY_SOURCE on,
+          # so headers redirect e.g. memcpy to __memcpy_chk (a libssp symbol the gcc
+          # driver does not auto-link on MinGW). Without it the libopus pkg-config
+          # check fails its link test with an undefined __memcpy_chk; build.rs links
+          # libssp the same way for the final exe.
           # Dump config.log on configure failure; its tail holds the real compiler
           # / pkg-config error behind FFmpeg's generic "not found" message.
           (cd build/ffmpeg-src && \
@@ -198,6 +198,7 @@ jobs:
               --enable-libopus --enable-libmp3lame \
               --extra-cflags="-I$PREFIX/include" \
               --extra-ldflags="-L$PREFIX/lib" \
+              --extra-libs="-lssp" \
               --pkg-config=pkg-config \
               --pkg-config-flags="--static") \
             || { echo "== ffbuild/config.log (tail) =="; \
