@@ -20,23 +20,28 @@ fn main() {
                 panic!("CODEC_LIB_DIR must be set when building bundle-tools for Windows")
             });
             println!("cargo:rustc-link-search=native={codec_lib_dir}");
-            for lib in ["x264", "vpx", "opus", "mp3lame"] {
-                println!("cargo:rustc-link-lib=static={lib}");
-            }
-            // Windows system libs that FFmpeg depends on.
-            for lib in ["bcrypt", "ws2_32", "secur32", "ole32", "user32"] {
-                println!("cargo:rustc-link-lib={lib}");
-            }
-            // Ubuntu's mingw-w64 gcc defaults _FORTIFY_SOURCE on, so the codec and
-            // libav* objects reference fortify/stack-protector symbols (__memcpy_chk,
-            // __stack_chk_fail) from libssp, which the gcc driver does not auto-link
-            // on MinGW. libssp.a lives in the gcc sysroot, which rustc's static-lib
-            // search doesn't know; ask the cross-compiler for its directory. Emit it
-            // last so it resolves those references from every preceding archive.
+            // libssp.a lives in the gcc sysroot, not on rustc's search path; ask the
+            // cross-compiler for its directory so -l:libssp.a below resolves.
             if let Some(dir) = mingw_libssp_dir() {
                 println!("cargo:rustc-link-search=native={dir}");
             }
-            println!("cargo:rustc-link-lib=static=ssp");
+            // The codec archives define symbols referenced by the upstream libav*
+            // objects (e.g. opus_multistream_*, vpx_codec_*, lame_*), and libssp
+            // defines the fortify/stack-protector symbols (__memcpy_chk,
+            // __stack_chk_*) that Ubuntu's mingw gcc emits by default and does not
+            // auto-link. rustc places a crate's own `rustc-link-lib` entries before
+            // the upstream rlibs, so the single-pass MinGW linker can't satisfy these
+            // backward references. Emit them as link args (which land after the
+            // upstream objects), wrapped in a group so order among them is irrelevant.
+            println!("cargo:rustc-link-arg=-Wl,--start-group");
+            for lib in ["x264", "vpx", "opus", "mp3lame", "ssp"] {
+                println!("cargo:rustc-link-arg=-l:lib{lib}.a");
+            }
+            // Windows system libs that FFmpeg depends on (DLL import libs).
+            for lib in ["bcrypt", "ws2_32", "secur32", "ole32", "user32"] {
+                println!("cargo:rustc-link-arg=-l{lib}");
+            }
+            println!("cargo:rustc-link-arg=-Wl,--end-group");
         }
     }
 }
