@@ -91,8 +91,22 @@ fn decoder_loop(path: String, req_rx: Receiver<DecodeRequest>, event_tx: Sender<
     if event_tx.send(opened).is_err() {
         return;
     }
-    if let Some(image) = dec.step_forward() {
-        let _ = event_tx.send(DecodeEvent::Frame { image, secs: dec.current_secs(), gen: 0 });
+    // A successfully opened video always has a first frame; if decoding it
+    // yields nothing, no decoder in this build can handle the codec (e.g. AV1
+    // on a build without a software AV1 decoder), which otherwise shows only a
+    // blank preview. Surface a named error instead.
+    match dec.step_forward() {
+        Some(image) => {
+            let _ = event_tx.send(DecodeEvent::Frame { image, secs: dec.current_secs(), gen: 0 });
+        }
+        None => {
+            let _ = event_tx.send(DecodeEvent::Error(format!(
+                "Couldn't decode the video stream (codec {}). This build of \
+                 yt-dlp-clipper has no decoder for it.",
+                dec.codec_name()
+            )));
+            return;
+        }
     }
 
     while let Ok(first) = req_rx.recv() {

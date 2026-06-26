@@ -22,6 +22,7 @@ pub struct Decoder {
     decoder: ffmpeg::decoder::Video,
     scaler: Scaler,
     stream_index: usize,
+    codec_id: ffmpeg::codec::Id,
     pub width: u32,
     pub height: u32,
 
@@ -62,7 +63,9 @@ impl Decoder {
         // one frame in time-base units, at least 1 so stepping always moves
         let frame_dur_ts = ((1.0 / fps) / time_base).round().max(1.0) as i64;
 
-        let ctx = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
+        let params = stream.parameters();
+        let codec_id = params.id();
+        let ctx = ffmpeg::codec::context::Context::from_parameters(params)?;
         let decoder = ctx.decoder().video()?;
         let (width, height) = (decoder.width(), decoder.height());
 
@@ -81,6 +84,7 @@ impl Decoder {
             decoder,
             scaler,
             stream_index,
+            codec_id,
             width,
             height,
             time_base,
@@ -96,6 +100,12 @@ impl Decoder {
 
     pub fn current_secs(&self) -> f64 {
         self.current_pts as f64 * self.time_base
+    }
+
+    /// The video stream's codec name (e.g. `AV1`, `H264`), for error messages
+    /// when no decoder in this build can produce frames from it.
+    pub fn codec_name(&self) -> String {
+        format!("{:?}", self.codec_id)
     }
 
     pub fn fps(&self) -> f64 {

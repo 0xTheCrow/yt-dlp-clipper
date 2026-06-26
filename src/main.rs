@@ -578,7 +578,8 @@ impl App {
             self.set_frame(ctx, image);
         }
         if let Some(e) = error {
-            self.status = format!("decode error: {e}");
+            self.status = "decode error".into();
+            self.last_error = Some(e);
             self.decoder = None;
         }
     }

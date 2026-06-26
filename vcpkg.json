@@ -17,6 +17,7 @@
         "gpl",
         "x264",
         "vpx",
+        "dav1d",
         "opus",
         "mp3lame"
       ]
