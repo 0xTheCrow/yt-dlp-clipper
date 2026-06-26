@@ -59,16 +59,20 @@ jobs:
     #
     # vcpkg (Microsoft's C/C++ package manager) is the only source of static FFmpeg
     # libraries built with the MSVC toolchain the Rust exe links against. It compiles
-    # FFmpeg from source; ffmpeg-sys-the-third then finds those libs and adds the
-    # Windows system libs itself. vcpkg is pinned to a commit whose ffmpeg port is
-    # 6.0 to match the FFmpeg 6.x API that ffmpeg-the-third 1.2 targets.
+    # FFmpeg + the codecs from source per vcpkg.json: a pinned baseline freezes the
+    # whole dependency graph to one vcpkg snapshot, with ffmpeg overridden to the 6.x
+    # the bindings target. The build installs into a private VCPKG_ROOT (C:\ff) that
+    # ffmpeg-sys-the-third reads to link libav* + the codecs + the Windows system libs.
     runs-on: windows-2022
     env:
       # vcpkg stores compiled packages here; caching it skips the ~12-minute FFmpeg
       # build on later runs.
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
-      # microsoft/vcpkg commit whose ffmpeg port is 6.0.
-      VCPKG_COMMIT: c6d6efed3e9b4242765bfe1b5c5befffd85f7b92
+      # vcpkg release the manifest's builtin-baseline pins to; checked out so its
+      # (current) build scripts run and the baseline resolves locally.
+      VCPKG_COMMIT: f3e10653cc27d62a37a3763cd84b38bca07c6075
+      # Private vcpkg root the manifest installs into; VCPKG_ROOT for the cargo build.
+      FF_VCPKG_ROOT: C:\ff
     steps:
       - uses: actions/checkout@v4
 
@@ -88,11 +92,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}\vcpkg-cache
-          key: vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}
+          key: vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
 
-      # Pin the preinstalled C:\vcpkg to the 6.0 commit, then build static FFmpeg and
-      # the codecs the app encodes with. x264 is the only H.264 encoder, so the
-      # binary is GPL — accepted.
+      # Check the preinstalled C:\vcpkg out to the pinned baseline so its current
+      # build scripts run (live MSYS2 download URLs) and the baseline resolves from
+      # the local repo, then build the manifest's static FFmpeg + codecs. x264 is the
+      # only H.264 encoder, so the binary is GPL — accepted. Installs into a private
+      # root: --x-install-root places the tree where the .vcpkg-root marker makes
+      # FF_VCPKG_ROOT a root ffmpeg-sys-the-third's vcpkg lookup accepts.
       - name: Build static FFmpeg via vcpkg
         shell: pwsh
         run: |
@@ -101,7 +108,10 @@ jobs:
           git -C C:\vcpkg checkout $env:VCPKG_COMMIT
           & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
           & C:\vcpkg\vcpkg.exe install `
-            "ffmpeg[avcodec,avformat,avfilter,swscale,swresample,gpl,x264,vpx,opus,mp3lame]:x64-windows-static"
+            --x-manifest-root=$env:GITHUB_WORKSPACE `
+            --x-install-root="$env:FF_VCPKG_ROOT\installed" `
+            --triplet x64-windows-static
+          New-Item -ItemType File -Force -Path "$env:FF_VCPKG_ROOT\.vcpkg-root" | Out-Null
 
       # The bundle-tools feature bakes these into the exe and extracts them on first
       # run: yt-dlp, and the ffmpeg CLI yt-dlp calls to merge streams (a runtime
@@ -119,13 +129,13 @@ jobs:
           7z e -y build\windows\ffmpeg.7z "ffmpeg-6.0-full_build/bin/ffmpeg.exe" -obuild\windows\
 
       # The runner's default Rust toolchain already targets MSVC, so a plain release
-      # build produces the exe. VCPKG_ROOT points the build at the pinned tree (the
-      # MSVC env step otherwise repoints it at a manifest-only copy); +crt-static
-      # links the CRT in, matching the x64-windows-static triplet.
+      # build produces the exe. VCPKG_ROOT points at the private tree the manifest
+      # installed into; +crt-static links the CRT in, matching the x64-windows-static
+      # triplet.
       - name: Build Windows exe
         shell: pwsh
         env:
-          VCPKG_ROOT: C:\vcpkg
+          VCPKG_ROOT: C:\ff
           VCPKGRS_TRIPLET: x64-windows-static
           RUSTFLAGS: -C target-feature=+crt-static
           LIBCLANG_PATH: C:\Program Files\LLVM\bin

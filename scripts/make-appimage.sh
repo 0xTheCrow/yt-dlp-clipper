@@ -29,12 +29,17 @@ echo "==> Building release binary"
 cargo build --release
 
 echo "==> Fetching tools + bundled binaries (cached in build/)"
-[ -f "$BUILD/linuxdeploy.AppImage" ] || wget -qO "$BUILD/linuxdeploy.AppImage" "$LINUXDEPLOY_URL"
-[ -f "$BUILD/yt-dlp" ]               || wget -qO "$BUILD/yt-dlp" "$YTDLP_URL"
+# -nv stays quiet but still prints the URL and any error (a fully-quiet -q hides why
+# a fetch failed); --tries lets a transient network blip retry instead of failing CI.
+fetch() { wget -nv --tries=3 --timeout=60 --retry-connrefused -O "$1" "$2"; }
+[ -f "$BUILD/linuxdeploy.AppImage" ] || fetch "$BUILD/linuxdeploy.AppImage" "$LINUXDEPLOY_URL"
+[ -f "$BUILD/yt-dlp" ]               || fetch "$BUILD/yt-dlp" "$YTDLP_URL"
 [ -f "$BUILD/ffmpeg" ] || {
-    wget -qO "$BUILD/ffmpeg.tar.xz" "$FFMPEG_URL"
+    fetch "$BUILD/ffmpeg.tar.xz" "$FFMPEG_URL"
     tar -xf "$BUILD/ffmpeg.tar.xz" -C "$BUILD"
-    cp "$(find "$BUILD" -type f -name ffmpeg -path '*static*' | head -1)" "$BUILD/ffmpeg"
+    ffmpeg_bin="$(find "$BUILD" -type f -name ffmpeg -path '*static*' | head -1)"
+    [ -n "$ffmpeg_bin" ] || { echo "error: no static ffmpeg binary in $FFMPEG_URL" >&2; exit 1; }
+    cp "$ffmpeg_bin" "$BUILD/ffmpeg"
 }
 chmod +x "$BUILD/linuxdeploy.AppImage" "$BUILD/yt-dlp" "$BUILD/ffmpeg"
 

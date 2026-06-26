@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "yt-dlp-clipper",
+  "version-string": "0.1.3",
+  "$comment-baseline": "builtin-baseline pins the ENTIRE dependency graph (ffmpeg + every codec + build-helper ports) to one vcpkg snapshot. It is the latest release tag, so its MSYS2 build-tool download URLs are live (an older snapshot's URLs rot as MSYS2 drops old revisions).",
+  "builtin-baseline": "f3e10653cc27d62a37a3763cd84b38bca07c6075",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat",
+        "avfilter",
+        "swscale",
+        "swresample",
+        "gpl",
+        "x264",
+        "vpx",
+        "opus",
+        "mp3lame"
+      ]
+    }
+  ],
+  "$comment-override": "ffmpeg-the-third 1.2 targets the FFmpeg 6.x API, so override ffmpeg down from the baseline's 8.x to the newest 6.x. Everything else stays at the baseline snapshot.",
+  "overrides": [
+    { "name": "ffmpeg", "version": "6.1.1#11" }
+  ]
+}
