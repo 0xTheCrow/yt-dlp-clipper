@@ -123,7 +123,24 @@ STAGE="$BUILD/dmg"
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"      # drag-to-install target
-hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+
+# hdiutil attaches a temporary image to build the .dmg; a background process
+# (Spotlight indexing the staging dir, a lingering mount) can hold a device busy
+# at that instant, failing with "Resource busy". The condition is transient, so
+# retry a few times before giving up.
+HDIUTIL_TRIES=3
+HDIUTIL_DELAY=10
+for attempt in $(seq 1 "$HDIUTIL_TRIES"); do
+    if hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null; then
+        break
+    fi
+    if [ "$attempt" -eq "$HDIUTIL_TRIES" ]; then
+        echo "hdiutil create failed after $HDIUTIL_TRIES attempts" >&2
+        exit 1
+    fi
+    echo "hdiutil create failed (attempt $attempt/$HDIUTIL_TRIES); retrying in ${HDIUTIL_DELAY}s" >&2
+    sleep "$HDIUTIL_DELAY"
+done
 
 echo "==> Done:"
 echo "    app: $APP"
