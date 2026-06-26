@@ -5,6 +5,20 @@ fn main() {
         let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
         embed("BUNDLE_YTDLP", "BUNDLED_YTDLP_PATH", "bundled-ytdlp", &out);
         embed("BUNDLE_FFMPEG_CLI", "BUNDLED_FFMPEG_CLI_PATH", "bundled-ffmpeg-cli", &out);
+        link_media_foundation();
+    }
+}
+
+/// vcpkg's static FFmpeg includes the MediaFoundation encoder (`mfenc.o`), whose COM
+/// interface GUIDs (`IID_IMFTransform`, `IID_ICodecAPI`, ...) and platform functions
+/// live in these Windows SDK import libs. ffmpeg-sys-the-third's vcpkg link step emits
+/// the other system libs (ole32, secur32, ws2_32, bcrypt, user32) but not these.
+fn link_media_foundation() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    for lib in ["mfplat", "mfuuid", "strmiids"] {
+        println!("cargo:rustc-link-lib={lib}");
     }
 }
 

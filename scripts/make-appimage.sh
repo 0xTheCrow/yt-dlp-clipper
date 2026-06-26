@@ -21,7 +21,10 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 
 LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
 YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
-FFMPEG_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+# GitHub-hosted static build (BtbN, an FFmpeg maintainer; linked from ffmpeg.org).
+# This is the runtime ffmpeg CLI yt-dlp merges with; it's independent of the libav*
+# the app links, so its version is not pinned to the build-time FFmpeg.
+FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
 
 mkdir -p "$BUILD"
 
@@ -37,8 +40,8 @@ fetch() { wget -nv --tries=3 --timeout=60 --retry-connrefused -O "$1" "$2"; }
 [ -f "$BUILD/ffmpeg" ] || {
     fetch "$BUILD/ffmpeg.tar.xz" "$FFMPEG_URL"
     tar -xf "$BUILD/ffmpeg.tar.xz" -C "$BUILD"
-    ffmpeg_bin="$(find "$BUILD" -type f -name ffmpeg -path '*static*' | head -1)"
-    [ -n "$ffmpeg_bin" ] || { echo "error: no static ffmpeg binary in $FFMPEG_URL" >&2; exit 1; }
+    ffmpeg_bin="$(find "$BUILD" -type f -name ffmpeg | head -1)"
+    [ -n "$ffmpeg_bin" ] || { echo "error: no ffmpeg binary in $FFMPEG_URL" >&2; exit 1; }
     cp "$ffmpeg_bin" "$BUILD/ffmpeg"
 }
 chmod +x "$BUILD/linuxdeploy.AppImage" "$BUILD/yt-dlp" "$BUILD/ffmpeg"
