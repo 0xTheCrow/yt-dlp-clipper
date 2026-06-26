@@ -39,7 +39,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
-            libavdevice-dev libswscale-dev libswresample-dev \
+            libswscale-dev libswresample-dev \
             clang pkg-config libasound2-dev
 
       - uses: Swatinem/rust-cache@v2
@@ -53,18 +53,22 @@ jobs:
           path: yt-dlp-clipper-*-x86_64.AppImage
 
   windows:
-    # Build the single self-contained exe natively on Windows with the MSVC
-    # toolchain. Static FFmpeg + codecs come from vcpkg (x64-windows-static);
-    # ffmpeg-sys-the-third's vcpkg path links libav* + x264/vpx/opus/mp3lame and
-    # adds the Windows system libs itself. MSVC's linker resolves order-
-    # independently, so none of the MinGW cross-compile pitfalls (GNU ld single-
-    # pass ordering, _FORTIFY_SOURCE/libssp, hand-maintained transitive deps)
-    # apply. `+crt-static` links the CRT statically, so the exe needs no VCRedist.
+    # One self-contained .exe: FFmpeg, the codecs, and the C runtime are all linked
+    # statically, so the file runs on a clean Windows box with no DLLs and no VC++
+    # redistributable.
+    #
+    # vcpkg (Microsoft's C/C++ package manager) is the only source of static FFmpeg
+    # libraries built with the MSVC toolchain the Rust exe links against. It compiles
+    # FFmpeg from source; ffmpeg-sys-the-third then finds those libs and adds the
+    # Windows system libs itself. vcpkg is pinned to a commit whose ffmpeg port is
+    # 6.0 to match the FFmpeg 6.x API that ffmpeg-the-third 1.2 targets.
     runs-on: windows-2022
     env:
-      # vcpkg writes built package archives here; caching this dir makes repeat
-      # runs skip the (slow) FFmpeg compile.
+      # vcpkg stores compiled packages here; caching it skips the ~12-minute FFmpeg
+      # build on later runs.
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
+      # microsoft/vcpkg commit whose ffmpeg port is 6.0.
+      VCPKG_COMMIT: c6d6efed3e9b4242765bfe1b5c5befffd85f7b92
     steps:
       - uses: actions/checkout@v4
 
@@ -73,39 +77,35 @@ jobs:
         shell: bash
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      - name: Add Rust MSVC target
-        run: rustup target add x86_64-pc-windows-msvc
-
-      # Activate the MSVC environment (sets INCLUDE/LIB/PATH) so ffmpeg-sys-the-
-      # third's bindgen pass can find the MSVC + Windows SDK system headers; clang
-      # reads the system include dirs from INCLUDE on the MSVC target.
-      - name: Set up MSVC developer environment
+      # Put the MSVC + Windows SDK headers on INCLUDE so ffmpeg-sys-the-third's
+      # bindgen pass (libclang) can find the system headers.
+      - name: Set up MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: x86_64-pc-windows-msvc
 
-      - name: Cache vcpkg binary archives
+      - name: Cache vcpkg packages
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}\vcpkg-cache
-          key: vcpkg-ffmpeg-static-v1-${{ hashFiles('.github/workflows/release.yml') }}
+          key: vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}
 
-      # GPL build: x264 (the only H.264 encoder) makes the binary GPL — accepted.
-      # Use the standalone C:\vcpkg by absolute path: the MSVC dev-cmd step exports
-      # VCPKG_ROOT pointing at the VS-bundled vcpkg, which is manifest-mode-only and
-      # rejects classic-mode `vcpkg install`.
+      # Pin the preinstalled C:\vcpkg to the 6.0 commit, then build static FFmpeg and
+      # the codecs the app encodes with. x264 is the only H.264 encoder, so the
+      # binary is GPL — accepted.
       - name: Build static FFmpeg via vcpkg
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
-          & "C:\vcpkg\vcpkg.exe" install `
+          git -C C:\vcpkg fetch --depth 1 origin $env:VCPKG_COMMIT
+          git -C C:\vcpkg checkout $env:VCPKG_COMMIT
+          & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          & C:\vcpkg\vcpkg.exe install `
             "ffmpeg[avcodec,avformat,avfilter,swscale,swresample,gpl,x264,vpx,opus,mp3lame]:x64-windows-static"
 
-      # yt-dlp: self-contained PyInstaller exe (no Python dependency).
-      # ffmpeg CLI: gyan full_build static exe — the runtime binary yt-dlp calls
-      #   to merge streams; separate from the libav* we link at build time.
+      # The bundle-tools feature bakes these into the exe and extracts them on first
+      # run: yt-dlp, and the ffmpeg CLI yt-dlp calls to merge streams (a runtime
+      # tool, separate from the libav* linked above).
       - name: Download embedded tool binaries
         shell: pwsh
         run: |
@@ -118,11 +118,10 @@ jobs:
             -OutFile build\windows\ffmpeg.7z
           7z e -y build\windows\ffmpeg.7z "ffmpeg-6.0-full_build/bin/ffmpeg.exe" -obuild\windows\
 
-      # VCPKG_ROOT → the vcpkg crate reads the installed tree from here; pin it to
-      #   the standalone C:\vcpkg (the dev-cmd step pointed it at the VS-bundled one).
-      # VCPKGRS_TRIPLET → make the vcpkg crate use the static triplet we built.
-      # +crt-static → static CRT, matching x64-windows-static, so no VCRedist dep.
-      # LIBCLANG_PATH → libclang for ffmpeg-sys-the-third's bindgen pass.
+      # The runner's default Rust toolchain already targets MSVC, so a plain release
+      # build produces the exe. VCPKG_ROOT points the build at the pinned tree (the
+      # MSVC env step otherwise repoints it at a manifest-only copy); +crt-static
+      # links the CRT in, matching the x64-windows-static triplet.
       - name: Build Windows exe
         shell: pwsh
         env:
@@ -132,14 +131,13 @@ jobs:
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
           BUNDLE_YTDLP: ${{ github.workspace }}\build\windows\yt-dlp.exe
           BUNDLE_FFMPEG_CLI: ${{ github.workspace }}\build\windows\ffmpeg.exe
-        run: cargo build --release --target x86_64-pc-windows-msvc --features bundle-tools
+        run: cargo build --release --features bundle-tools
 
       - name: Stage release exe
         shell: bash
         run: |
           VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
-          cp target/x86_64-pc-windows-msvc/release/yt-dlp-clipper.exe \
-             "yt-dlp-clipper-${VERSION}-win64.exe"
+          cp target/release/yt-dlp-clipper.exe "yt-dlp-clipper-${VERSION}-win64.exe"
 
       - uses: actions/upload-artifact@v4
         with:
