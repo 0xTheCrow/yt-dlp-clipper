@@ -6,7 +6,19 @@ fn main() {
         embed("BUNDLE_YTDLP", "BUNDLED_YTDLP_PATH", "bundled-ytdlp", &out);
         embed("BUNDLE_FFMPEG_CLI", "BUNDLED_FFMPEG_CLI_PATH", "bundled-ffmpeg-cli", &out);
         link_media_foundation();
+        link_dav1d();
     }
+}
+
+/// vcpkg's static FFmpeg enables the dav1d AV1 decoder, so `avcodec.lib` carries a
+/// `libdav1d.o` wrapper that references `dav1d_*`. ffmpeg-sys-the-third's vcpkg link
+/// step emits the other codec libs (x264, vpx, opus, mp3lame) but not dav1d, leaving
+/// those symbols unresolved; emit `dav1d.lib` (on the vcpkg LIBPATH) ourselves.
+fn link_dav1d() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    println!("cargo:rustc-link-lib=dav1d");
 }
 
 /// vcpkg's static FFmpeg includes the MediaFoundation encoder (`mfenc.o`), whose COM
