@@ -1,39 +1,41 @@
-/// A bindable shortcut: a key plus whether Shift must be held. Shift lets the
-/// arrow keys carry two actions each (skip vs. single-frame step).
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Shortcut {
     pub(crate) key: egui::Key,
+    pub(crate) ctrl: bool,
     pub(crate) shift: bool,
 }
 
 impl Shortcut {
     pub(crate) const fn plain(key: egui::Key) -> Self {
-        Self { key, shift: false }
+        Self { key, ctrl: false, shift: false }
     }
     pub(crate) const fn shifted(key: egui::Key) -> Self {
-        Self { key, shift: true }
+        Self { key, ctrl: false, shift: true }
     }
-    /// Label for the settings button, e.g. "Space" or "Shift+ArrowLeft".
+    pub(crate) const fn ctrl(key: egui::Key) -> Self {
+        Self { key, ctrl: true, shift: false }
+    }
     pub(crate) fn label(self) -> String {
-        if self.shift {
-            format!("Shift+{}", self.key.name())
-        } else {
-            self.key.name().to_owned()
+        let mut label = String::new();
+        if self.ctrl {
+            label.push_str("Ctrl+");
         }
+        if self.shift {
+            label.push_str("Shift+");
+        }
+        label.push_str(self.key.name());
+        label
     }
 }
 
-/// True on the frame `sc` is pressed (with the exact Shift state). For one-shot
-/// actions like set-start / play-pause.
 pub(crate) fn shortcut_pressed(i: &egui::InputState, sc: Shortcut) -> bool {
-    i.key_pressed(sc.key) && i.modifiers.shift == sc.shift
+    i.key_pressed(sc.key) && i.modifiers.ctrl == sc.ctrl && i.modifiers.shift == sc.shift
 }
 
-/// True while `sc` is held (exact Shift state). Paired with a manual timer for
-/// hold-to-repeat navigation.
 pub(crate) fn shortcut_down(i: &egui::InputState, sc: Shortcut) -> bool {
-    i.key_down(sc.key) && i.modifiers.shift == sc.shift
+    i.key_down(sc.key) && i.modifiers.ctrl == sc.ctrl && i.modifiers.shift == sc.shift
 }
+
 
 /// A user-rebindable keyboard action.
 #[derive(Clone, Copy, PartialEq)]
@@ -46,12 +48,14 @@ pub(crate) enum Bind {
     SkipForward,
     StepBack,
     StepForward,
+    Undo,
+    Redo,
 }
 
 impl Bind {
     /// All actions, in display order (row-major: each consecutive pair forms one
     /// two-column grid row), with their settings labels.
-    pub(crate) const ALL: [(Bind, &'static str); 8] = [
+    pub(crate) const ALL: [(Bind, &'static str); 10] = [
         (Bind::SetStart, "Set start"),
         (Bind::SetEnd, "Set end"),
         (Bind::PlayPauseClip, "Play / pause clip"),
@@ -60,6 +64,8 @@ impl Bind {
         (Bind::SkipBack, "Skip back 5s"),
         (Bind::StepForward, "Step forward 1 frame"),
         (Bind::StepBack, "Step back 1 frame"),
+        (Bind::Undo, "Undo"),
+        (Bind::Redo, "Redo"),
     ];
 
     /// Stable identifier for persistence, decoupled from display order so
@@ -74,6 +80,8 @@ impl Bind {
             Bind::SkipForward => "skip_forward",
             Bind::StepBack => "step_back",
             Bind::StepForward => "step_forward",
+            Bind::Undo => "undo",
+            Bind::Redo => "redo",
         }
     }
 
@@ -93,6 +101,8 @@ pub(crate) struct Keybinds {
     pub(crate) skip_forward: Shortcut,
     pub(crate) step_back: Shortcut,
     pub(crate) step_forward: Shortcut,
+    pub(crate) undo: Shortcut,
+    pub(crate) redo: Shortcut,
 }
 
 impl Default for Keybinds {
@@ -106,6 +116,8 @@ impl Default for Keybinds {
             skip_forward: Shortcut::plain(egui::Key::ArrowRight),
             step_back: Shortcut::shifted(egui::Key::ArrowLeft),
             step_forward: Shortcut::shifted(egui::Key::ArrowRight),
+            undo: Shortcut::ctrl(egui::Key::Z),
+            redo: Shortcut::ctrl(egui::Key::Y),
         }
     }
 }
@@ -121,6 +133,8 @@ impl Keybinds {
             Bind::SkipForward => self.skip_forward,
             Bind::StepBack => self.step_back,
             Bind::StepForward => self.step_forward,
+            Bind::Undo => self.undo,
+            Bind::Redo => self.redo,
         }
     }
 
@@ -134,6 +148,8 @@ impl Keybinds {
             Bind::SkipForward => self.skip_forward = sc,
             Bind::StepBack => self.step_back = sc,
             Bind::StepForward => self.step_forward = sc,
+            Bind::Undo => self.undo = sc,
+            Bind::Redo => self.redo = sc,
         }
     }
 

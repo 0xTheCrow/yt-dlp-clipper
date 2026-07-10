@@ -46,10 +46,19 @@ const EXPORT_HEIGHT_LADDER: [u32; 8] = [2160, 1440, 1080, 720, 480, 360, 240, 14
 
 /// Seconds skipped by the skip-back / skip-forward keys.
 const SKIP_SECS: f64 = 5.0;
+/// Cap on retained clip-range edits per undo/redo stack.
+const CLIP_HISTORY_LIMIT: usize = 128;
 /// Held nav key: how long before auto-repeat begins, then the interval between
 /// repeats (seconds). Keeps a held key from firing too fast.
 const NAV_REPEAT_DELAY: f64 = 0.3;
 const NAV_REPEAT_INTERVAL: f64 = 0.1;
+
+/// A snapshot of the clip in/out points, retained for undo/redo.
+#[derive(Clone, Copy)]
+struct ClipRange {
+    in_secs: f64,
+    out_secs: f64,
+}
 
 /// Inner margin for text input fields. Vertical padding is kept small so inputs
 /// never stand taller than the buttons beside them.
@@ -107,17 +116,28 @@ fn main() -> eframe::Result<()> {
                 if let Some(name) = eframe::get_value::<String>(storage, THEME_KEY) {
                     app.theme = theme_pref_from_name(&name);
                 }
-                // Each shortcut persists as (action id, key name, shift). Keyed by
-                // a stable id so reordering/adding actions can't misread a save;
-                // unknown ids and absent actions just keep their defaults.
+                // Each shortcut persists as (action id, key name, ctrl, shift).
+                // Keyed by a stable id so reordering/adding actions can't misread
+                // a save; unknown ids and absent actions just keep their defaults.
+                // Falls back to the older ctrl-less (id, name, shift) format.
                 if let Some(saved) =
+                    eframe::get_value::<Vec<(String, String, bool, bool)>>(storage, KEYBINDS_KEY)
+                {
+                    for (id, name, ctrl, shift) in saved {
+                        if let (Some(bind), Some(key)) =
+                            (Bind::from_id(&id), egui::Key::from_name(&name))
+                        {
+                            app.keybinds.put(bind, Shortcut { key, ctrl, shift });
+                        }
+                    }
+                } else if let Some(saved) =
                     eframe::get_value::<Vec<(String, String, bool)>>(storage, KEYBINDS_KEY)
                 {
                     for (id, name, shift) in saved {
                         if let (Some(bind), Some(key)) =
                             (Bind::from_id(&id), egui::Key::from_name(&name))
                         {
-                            app.keybinds.put(bind, Shortcut { key, shift });
+                            app.keybinds.put(bind, Shortcut { key, ctrl: false, shift });
                         }
                     }
                 }
@@ -186,6 +206,8 @@ struct App {
     frame_tex: Option<egui::TextureHandle>,
     in_secs: f64,
     out_secs: f64,
+    undo_stack: Vec<ClipRange>,
+    redo_stack: Vec<ClipRange>,
 
     ui_scale: f32,
     /// Scale being edited in Settings; applied to `ui_scale` only on Apply.
@@ -279,6 +301,8 @@ impl Default for App {
             frame_tex: None,
             in_secs: 0.0,
             out_secs: 0.0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             ui_scale: 1.0,
             pending_scale: 1.0,
             theme: egui::ThemePreference::System,
@@ -413,6 +437,49 @@ impl App {
         self.download_dir.clone().unwrap_or_else(managed_cache_dir)
     }
 
+    fn record_clip_edit(&mut self) {
+        self.undo_stack.push(ClipRange { in_secs: self.in_secs, out_secs: self.out_secs });
+        if self.undo_stack.len() > CLIP_HISTORY_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn set_in_secs(&mut self, secs: f64) {
+        if self.in_secs != secs {
+            self.record_clip_edit();
+            self.in_secs = secs;
+        }
+    }
+
+    fn set_out_secs(&mut self, secs: f64) {
+        if self.out_secs != secs {
+            self.record_clip_edit();
+            self.out_secs = secs;
+        }
+    }
+
+    fn undo_clip_edit(&mut self) {
+        if let Some(range) = self.undo_stack.pop() {
+            self.redo_stack.push(ClipRange { in_secs: self.in_secs, out_secs: self.out_secs });
+            self.in_secs = range.in_secs;
+            self.out_secs = range.out_secs;
+        }
+    }
+
+    fn redo_clip_edit(&mut self) {
+        if let Some(range) = self.redo_stack.pop() {
+            self.undo_stack.push(ClipRange { in_secs: self.in_secs, out_secs: self.out_secs });
+            self.in_secs = range.in_secs;
+            self.out_secs = range.out_secs;
+        }
+    }
+
+    fn clear_clip_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+
     fn reset_for_new_video(&mut self) {
         self.stop_play();
         self.rx = None;
@@ -422,6 +489,7 @@ impl App {
         self.frame_tex = None;
         self.in_secs = 0.0;
         self.out_secs = 0.0;
+        self.clear_clip_history();
         self.nav_repeat_at = [0.0; 4];
         self.play_start_wall = 0.0;
         self.play_start_pos = 0.0;
@@ -599,6 +667,7 @@ impl App {
             }
             self.in_secs = 0.0;
             self.out_secs = duration_secs;
+            self.clear_clip_history();
         }
         if let Some((image, secs)) = latest_frame {
             if let Some(dec) = &mut self.decoder {
@@ -1076,14 +1145,14 @@ impl App {
             let captured = ctx.input(|i| {
                 i.events.iter().find_map(|e| match e {
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                        Some((*key, modifiers.shift))
+                        Some((*key, modifiers.ctrl, modifiers.shift))
                     }
                     _ => None,
                 })
             });
-            if let Some((key, shift)) = captured {
+            if let Some((key, ctrl, shift)) = captured {
                 if key != egui::Key::Escape {
-                    self.keybinds.rebind(bind, Shortcut { key, shift });
+                    self.keybinds.rebind(bind, Shortcut { key, ctrl, shift });
                 }
                 rebinding = None;
             }
@@ -1407,7 +1476,7 @@ impl App {
                     .add_enabled(can_set_start, egui::Button::new(start_label.as_str()))
                     .clicked()
                 {
-                    self.in_secs = set_pos;
+                    self.set_in_secs(set_pos);
                 }
                 ui.monospace(&in_time);
             },
@@ -1436,7 +1505,7 @@ impl App {
                     .add_enabled(can_set_end, egui::Button::new(end_label.as_str()))
                     .clicked()
                 {
-                    self.out_secs = set_pos;
+                    self.set_out_secs(set_pos);
                 }
             },
         );
@@ -1607,13 +1676,13 @@ impl eframe::App for App {
         eframe::set_value(storage, COMPATIBILITY_MODE_KEY, &self.compatibility_mode);
         eframe::set_value(storage, VOLUME_KEY, &self.volume);
         eframe::set_value(storage, THEME_KEY, &theme_pref_name(self.theme).to_owned());
-        // Persist each shortcut as (key name, shift) so we don't depend on egui's
-        // serde feature; keyed by stable action id so the loader is order-proof.
-        let keys: Vec<(String, String, bool)> = Bind::ALL
+        // Persist each shortcut as (key name, ctrl, shift) so we don't depend on
+        // egui's serde feature; keyed by stable action id so the loader is order-proof.
+        let keys: Vec<(String, String, bool, bool)> = Bind::ALL
             .iter()
             .map(|(bind, _)| {
                 let sc = self.keybinds.shortcut(*bind);
-                (bind.id().to_owned(), sc.key.name().to_owned(), sc.shift)
+                (bind.id().to_owned(), sc.key.name().to_owned(), sc.ctrl, sc.shift)
             })
             .collect();
         eframe::set_value(storage, KEYBINDS_KEY, &keys);
@@ -1642,11 +1711,17 @@ impl eframe::App for App {
             if let Some(cur) = cur {
                 let set_pos = self.awaiting_release.map_or(cur, |(_, pos)| pos);
                 if ctx.input(|i| shortcut_pressed(i, kb.set_start)) && set_pos < self.out_secs {
-                    self.in_secs = set_pos;
+                    self.set_in_secs(set_pos);
                 }
                 if ctx.input(|i| shortcut_pressed(i, kb.set_end)) && set_pos > self.in_secs {
-                    self.out_secs = set_pos;
+                    self.set_out_secs(set_pos);
                 }
+            }
+            if ctx.input(|i| shortcut_pressed(i, kb.undo)) {
+                self.undo_clip_edit();
+            }
+            if ctx.input(|i| shortcut_pressed(i, kb.redo)) {
+                self.redo_clip_edit();
             }
 
             // Nav keys repeat while held, on a timer so they don't fire too fast:
