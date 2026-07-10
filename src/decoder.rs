@@ -54,7 +54,7 @@ impl Decoder {
             stream.duration()
         } else {
             let container_secs = ictx.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
-            (container_secs / time_base) as i64
+            ((container_secs / time_base) as i64).max(0)
         };
 
         // frames-per-second, from the stream's average frame rate

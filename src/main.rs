@@ -406,16 +406,34 @@ impl App {
         self.download_dir.clone().unwrap_or_else(managed_cache_dir)
     }
 
+    fn reset_for_new_video(&mut self) {
+        self.stop_play();
+        self.decoder = None;
+        self.video_path = None;
+        self.video_title = None;
+        self.frame_tex = None;
+        self.in_secs = 0.0;
+        self.out_secs = 0.0;
+        self.nav_repeat_at = [0.0; 4];
+        self.play_start_wall = 0.0;
+        self.play_start_pos = 0.0;
+        self.saved_path = None;
+        self.last_error = None;
+        self.progress = None;
+        self.exporting = false;
+        self.export_path = None;
+        self.export_cancel = Arc::new(AtomicBool::new(false));
+        self.export_height = None;
+        self.selected_height = None;
+    }
+
     fn load_video(&mut self, path: PathBuf) {
+        self.reset_for_new_video();
         self.video_title = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned());
         self.decoder = Some(DecoderHandle::spawn(path.to_string_lossy().into_owned()));
         self.video_path = Some(path);
-        self.in_secs = 0.0;
-        self.out_secs = 0.0;
-        self.frame_tex = None;
-        self.stop_play();
     }
 
     /// Stop playback and release the audio output.
@@ -710,6 +728,7 @@ impl App {
         self.show_cache = open;
         if let Some(path) = selected {
             self.load_video(path);
+            self.info = None;
             self.show_cache = false;
             self.url.clear();
             self.status.clear();
@@ -1088,6 +1107,8 @@ impl App {
                     let fetch = icon_button(ui, download_icon(), "Fetch");
                     if (fetch.clicked() || submitted) && !self.url.is_empty() {
                         let url = self.url.clone();
+                        self.reset_for_new_video();
+                        self.info = None;
                         self.status = "fetching…".into();
                         self.spawn(move |tx| {
                             let _ = tx.send(match ytdlp::fetch_info(&url) {
@@ -1099,6 +1120,7 @@ impl App {
                     if ui.button("Open file…").clicked() {
                         if let Some(p) = rfd::FileDialog::new().pick_file() {
                             self.load_video(p);
+                            self.info = None;
                             self.url.clear();
                             self.status.clear();
                         }
@@ -1340,6 +1362,7 @@ impl App {
         };
         let btn_w = |ui: &egui::Ui, text: &str| text_w(ui, text, &btn_font) + 2.0 * pad;
 
+        let set_pos = self.awaiting_release.map_or(cur, |(_, pos)| pos);
         let in_time = fmt_time(self.in_secs);
         let out_time = fmt_time(self.out_secs);
         let start_label = format!("⟦ Set Start ({})", self.keybinds.set_start.label());
@@ -1365,12 +1388,12 @@ impl App {
         ui.allocate_new_ui(
             sub(row.left(), left_w, egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
-                let can_set_start = cur <= self.out_secs;
+                let can_set_start = set_pos < self.out_secs;
                 if ui
                     .add_enabled(can_set_start, egui::Button::new(start_label.as_str()))
                     .clicked()
                 {
-                    self.in_secs = cur;
+                    self.in_secs = set_pos;
                 }
                 ui.monospace(&in_time);
             },
@@ -1394,12 +1417,12 @@ impl App {
             sub(row.right() - right_w, right_w, egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
                 ui.monospace(&out_time);
-                let can_set_end = cur >= self.in_secs;
+                let can_set_end = set_pos > self.in_secs;
                 if ui
                     .add_enabled(can_set_end, egui::Button::new(end_label.as_str()))
                     .clicked()
                 {
-                    self.out_secs = cur;
+                    self.out_secs = set_pos;
                 }
             },
         );
@@ -1603,11 +1626,12 @@ impl eframe::App for App {
                 self.toggle_play_clip(now);
             }
             if let Some(cur) = cur {
-                if ctx.input(|i| shortcut_pressed(i, kb.set_start)) && cur <= self.out_secs {
-                    self.in_secs = cur;
+                let set_pos = self.awaiting_release.map_or(cur, |(_, pos)| pos);
+                if ctx.input(|i| shortcut_pressed(i, kb.set_start)) && set_pos < self.out_secs {
+                    self.in_secs = set_pos;
                 }
-                if ctx.input(|i| shortcut_pressed(i, kb.set_end)) && cur >= self.in_secs {
-                    self.out_secs = cur;
+                if ctx.input(|i| shortcut_pressed(i, kb.set_end)) && set_pos > self.in_secs {
+                    self.out_secs = set_pos;
                 }
             }
 
