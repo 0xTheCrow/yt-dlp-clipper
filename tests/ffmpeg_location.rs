@@ -31,7 +31,9 @@ fn download_passes_ffmpeg_location() {
     ytdlp::set_binary(shim);
     ytdlp::set_ffmpeg(ffmpeg.clone());
 
-    let _ = ytdlp::download("https://example.com/v", Some("bestvideo+bestaudio"), &dir, |_, _| {});
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let _ =
+        ytdlp::download("https://example.com/v", Some("bestvideo+bestaudio"), &dir, &cancel, |_, _| {});
 
     let recorded = fs::read_to_string(&argv_log).expect("shim should have recorded yt-dlp's argv");
     let args: Vec<&str> = recorded.lines().collect();

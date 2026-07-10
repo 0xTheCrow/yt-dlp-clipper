@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// Absolute path to the yt-dlp binary, set once at startup. Resolving it up front
@@ -238,6 +239,7 @@ pub fn download(
     url: &str,
     selector: Option<&str>,
     dir: &Path,
+    cancel: &AtomicBool,
     mut on_progress: impl FnMut(u64, u64),
 ) -> Result<PathBuf> {
     // Name files by title (yt-dlp sanitizes it); the id keeps them unique. The
@@ -285,6 +287,11 @@ pub fn download(
     let stdout = child.stdout.take().expect("piped stdout");
     let mut final_path = None;
     for line in BufReader::new(stdout).lines() {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("download canceled");
+        }
         let line = line.unwrap_or_default();
         if let Some(rest) = line.strip_prefix("PROGRESS ") {
             let fields: Vec<&str> = rest.split_whitespace().collect();

@@ -209,6 +209,10 @@ struct App {
     /// Cancel flag for the in-flight export; set by the Cancel button, checked by
     /// the encode loop. A fresh flag is created per export.
     export_cancel: Arc<AtomicBool>,
+    /// Cancel flag for the in-flight download; set when a new video is loaded,
+    /// checked by the yt-dlp read loop so it kills the subprocess. A fresh flag
+    /// is created per download.
+    download_cancel: Arc<AtomicBool>,
 
     /// Where downloads are saved; `None` uses the managed cache directory.
     download_dir: Option<PathBuf>,
@@ -284,6 +288,7 @@ impl Default for App {
             exporting: false,
             export_path: None,
             export_cancel: Arc::new(AtomicBool::new(false)),
+            download_cancel: Arc::new(AtomicBool::new(false)),
             download_dir: None,
             output_dir: None,
             delete_cache_on_exit: false,
@@ -408,6 +413,7 @@ impl App {
 
     fn reset_for_new_video(&mut self) {
         self.stop_play();
+        self.rx = None;
         self.decoder = None;
         self.video_path = None;
         self.video_title = None;
@@ -422,7 +428,10 @@ impl App {
         self.progress = None;
         self.exporting = false;
         self.export_path = None;
+        self.export_cancel.store(true, Ordering::Relaxed);
         self.export_cancel = Arc::new(AtomicBool::new(false));
+        self.download_cancel.store(true, Ordering::Relaxed);
+        self.download_cancel = Arc::new(AtomicBool::new(false));
         self.export_height = None;
         self.selected_height = None;
     }
@@ -1191,12 +1200,15 @@ impl App {
                         let _ = std::fs::create_dir_all(&dir);
                         self.status = "downloading…".into();
                         self.progress = Some((0, 0));
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        self.download_cancel = cancel.clone();
                         self.spawn(move |tx| {
                             let progress_tx = tx.clone();
                             let result = ytdlp::download(
                                 &url,
                                 selector.as_deref(),
                                 &dir,
+                                &cancel,
                                 |downloaded, total| {
                                     let _ = progress_tx.send(Msg::Progress { downloaded, total });
                                 },
