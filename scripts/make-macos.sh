@@ -55,8 +55,15 @@ mkdir -p "$BUILD"
 
 # --- build (link against the pinned ffmpeg 6.x, not brew's default 7.x) --------
 # ffmpeg-sys-the-third finds headers + dylibs via pkg-config; point it at ffmpeg@6.
+# pkg-config emits the versioned Cellar path (.../ffmpeg@6/6.1.5/lib) as a link
+# search dir, and ffmpeg-sys-the-third bakes it into its build-script output. A
+# cached build (Swatinem/rust-cache) then reuses that path after brew bumps
+# ffmpeg@6 to a newer patch, so the vanished Cellar dir breaks the final link.
+# LIBRARY_PATH adds the stable opt symlink (always the current version) to the
+# linker's search, so libav* resolves regardless of a stale cached Cellar path.
 echo "==> Building release binary against ffmpeg@6 ($ARCH)"
 export PKG_CONFIG_PATH="$FFMPEG6_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+export LIBRARY_PATH="$FFMPEG6_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
 cargo build --release
 
 # --- fetch runtime binaries (cached) ------------------------------------------
