@@ -22,8 +22,9 @@ use format::{audio_format_label, fmt_duration, fmt_size, fmt_time, sanitize_file
 use keybinds::{shortcut_down, shortcut_pressed, Bind, Keybinds, Shortcut};
 use theme::{apply_theme, theme_pref_from_name, theme_pref_label, theme_pref_name};
 use widgets::{
-    attach_text_menu, button_height, download_icon, icon_button, reveal_in_file_manager, save_icon,
-    settings_icon, text_edit_selection, toggle_switch,
+    arrow_image, attach_text_menu, bracket_left_icon, bracket_right_icon, bracketed_button,
+    button_height, download_icon, icon_button, play_selection_icon, reveal_in_file_manager,
+    save_icon, settings_icon, text_edit_selection, toggle_switch, BRACKET_ASPECT,
 };
 
 /// On-disk identifier for the app-data dir (settings + download cache). Kept
@@ -264,8 +265,8 @@ struct App {
     export_height: Option<u32>,
 
     playing: bool,
-    /// When set, playback stops once the master clock reaches this position
-    /// (used by "Play Clip" to stop at the out point); `None` plays to the end.
+    /// When set, playback stops once the master clock reaches this position;
+    /// `None` plays to the end.
     play_until: Option<f64>,
     /// Output volume in `0.0..=1.0`, applied to audio playback.
     volume: f32,
@@ -1445,16 +1446,23 @@ impl App {
         };
         let btn_w = |ui: &egui::Ui, text: &str| text_w(ui, text, &btn_font) + 2.0 * pad;
 
+        let row_h = button_height(ui);
+        let icon_w = ui.text_style_height(&egui::TextStyle::Button);
+        let icon_gap = ui.spacing().icon_spacing;
+        let bracket_icon_w = icon_w * BRACKET_ASPECT;
+        let icon_btn_w = |ui: &egui::Ui, icon_w: f32, text: &str| {
+            icon_w + icon_gap + text_w(ui, text, &btn_font) + 2.0 * pad
+        };
+        let play_selection_w = icon_btn_w(ui, icon_w, "Play Selection");
+
         let set_pos = self.awaiting_release.map_or(cur, |(_, pos)| pos);
         let in_time = fmt_time(self.in_secs);
         let out_time = fmt_time(self.out_secs);
-        let start_label = format!("⟦ Set Start ({})", self.keybinds.set_start.label());
-        let end_label = format!("Set End ({}) ⟧", self.keybinds.set_end.label());
-        let left_w = btn_w(ui, &start_label) + gap + text_w(ui, &in_time, &mono_font);
-        let right_w = text_w(ui, &out_time, &mono_font) + gap + btn_w(ui, &end_label);
-        let center_w = btn_w(ui, "▶ Play Clip") + gap + btn_w(ui, "⏸ Pause");
-
-        let row_h = button_height(ui);
+        let start_label = format!("Set Start ({})", self.keybinds.set_start.label());
+        let end_label = format!("Set End ({})", self.keybinds.set_end.label());
+        let left_w = icon_btn_w(ui, bracket_icon_w, &start_label) + gap + text_w(ui, &in_time, &mono_font);
+        let right_w = text_w(ui, &out_time, &mono_font) + gap + icon_btn_w(ui, bracket_icon_w, &end_label);
+        let center_w = play_selection_w + gap + btn_w(ui, "⏸ Pause");
         let (row, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::hover());
         let sub = |min_x: f32, w: f32, layout: egui::Layout| {
@@ -1472,10 +1480,7 @@ impl App {
             sub(row.left(), left_w, egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
                 let can_set_start = set_pos < self.out_secs;
-                if ui
-                    .add_enabled(can_set_start, egui::Button::new(start_label.as_str()))
-                    .clicked()
-                {
+                if bracketed_button(ui, &start_label, bracket_left_icon(), true, can_set_start).clicked() {
                     self.set_in_secs(set_pos);
                 }
                 ui.monospace(&in_time);
@@ -1484,7 +1489,16 @@ impl App {
         ui.allocate_new_ui(
             sub(center_x, center_w, egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
-                if ui.button("▶ Play Clip").clicked() {
+                if icon_button(ui, play_selection_icon(), "Play Selection")
+                    .on_hover_ui(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Plays the trimmed selection (Start");
+                            arrow_image(ui);
+                            ui.label("End)");
+                        });
+                    })
+                    .clicked()
+                {
                     let now = ui.input(|i| i.time);
                     self.play_from(self.in_secs, Some(self.out_secs), now);
                 }
@@ -1501,10 +1515,7 @@ impl App {
             |ui| {
                 ui.monospace(&out_time);
                 let can_set_end = set_pos > self.in_secs;
-                if ui
-                    .add_enabled(can_set_end, egui::Button::new(end_label.as_str()))
-                    .clicked()
-                {
+                if bracketed_button(ui, &end_label, bracket_right_icon(), false, can_set_end).clicked() {
                     self.set_out_secs(set_pos);
                 }
             },
@@ -1523,8 +1534,13 @@ impl App {
                     self.stop_play();
                     *nav = Some(Nav::Back);
                 }
-                let play_label = if self.playing { "⏸  Pause" } else { "▶  Play" };
-                if ui.button(play_label).clicked() {
+                let play_label = if self.playing { "⏸  Pause" } else { "▶  Play from Seeker" };
+                let play_w = text_w(ui, "▶  Play from Seeker", &btn_font) + 2.0 * pad;
+                if ui
+                    .add(egui::Button::new(play_label).min_size(egui::vec2(play_w, 0.0)))
+                    .on_hover_text("Plays from the current seeker position to the end")
+                    .clicked()
+                {
                     self.toggle_play(ui.input(|i| i.time));
                 }
                 if ui.button("Frame  ⏭").clicked() {
@@ -1752,7 +1768,6 @@ impl eframe::App for App {
             const RESYNC_SECS: f64 = 0.5;
             let clock = self.master_clock(now);
             if let Some(end) = self.play_until.filter(|&end| clock >= end) {
-                // "Play Clip" reached the out point: stop and pin to the end.
                 self.stop_play();
                 if let Some(dec) = &self.decoder {
                     dec.seek_secs(end);

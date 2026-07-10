@@ -15,11 +15,97 @@ pub(crate) fn settings_icon() -> egui::ImageSource<'static> {
     egui::include_image!("../assets/settings.svg")
 }
 
+pub(crate) fn play_selection_icon() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/play-selection.svg")
+}
+
+pub(crate) fn bracket_left_icon() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/bracket-left.svg")
+}
+
+pub(crate) fn bracket_right_icon() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/bracket-right.svg")
+}
+
+pub(crate) fn arrow_right_icon() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/arrow-right.svg")
+}
+
+pub(crate) const BRACKET_ASPECT: f32 = 1.0 / 3.0;
+pub(crate) const ARROW_ASPECT: f32 = 1.4;
+pub(crate) const ARROW_HEIGHT_RATIO: f32 = 0.62;
+
+/// A button styled like a plain egui button but with a framing bracket `icon`
+/// inside it, on the trailing edge when `icon_leading` is false (which egui's
+/// own `Button` can't place). The icon tints and dims with the button state.
+pub(crate) fn bracketed_button(
+    ui: &mut egui::Ui,
+    text: &str,
+    icon: egui::ImageSource<'static>,
+    icon_leading: bool,
+    enabled: bool,
+) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        let padding = ui.spacing().button_padding;
+        let icon_gap = ui.spacing().icon_spacing;
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let galley = ui.fonts(|f| f.layout_no_wrap(text.to_owned(), font, egui::Color32::PLACEHOLDER));
+        let icon_side = ui.text_style_height(&egui::TextStyle::Button);
+        let icon_size = egui::vec2(icon_side * BRACKET_ASPECT, icon_side);
+
+        let content = egui::vec2(
+            icon_size.x + icon_gap + galley.size().x,
+            icon_size.y.max(galley.size().y),
+        );
+        let mut desired = content + 2.0 * padding;
+        desired.y = desired.y.max(ui.spacing().interact_size.y);
+
+        let (rect, response) = ui.allocate_at_least(desired, egui::Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
+
+        if ui.is_rect_visible(rect) {
+            let visuals = ui.style().interact(&response);
+            ui.painter().rect(
+                rect.expand2(egui::Vec2::splat(visuals.expansion)),
+                visuals.rounding,
+                visuals.weak_bg_fill,
+                visuals.bg_stroke,
+            );
+            let inner = rect.shrink2(padding);
+            let icon_x = if icon_leading { inner.min.x } else { inner.max.x - icon_size.x };
+            let text_x = if icon_leading { inner.min.x + icon_size.x + icon_gap } else { inner.min.x };
+            let icon_rect = egui::Rect::from_min_size(
+                egui::pos2(icon_x, inner.center().y - icon_size.y / 2.0),
+                icon_size,
+            );
+            egui::Image::new(icon).tint(visuals.text_color()).paint_at(ui, icon_rect);
+            ui.painter().galley(
+                egui::pos2(text_x, inner.center().y - galley.size().y / 2.0),
+                galley,
+                visuals.text_color(),
+            );
+        }
+        response
+    })
+    .inner
+}
+
+pub(crate) fn arrow_image(ui: &mut egui::Ui) -> egui::Response {
+    let height = ui.text_style_height(&egui::TextStyle::Body) * ARROW_HEIGHT_RATIO;
+    ui.add(
+        egui::Image::new(arrow_right_icon())
+            .fit_to_exact_size(egui::vec2(height * ARROW_ASPECT, height))
+            .tint(ui.visuals().text_color()),
+    )
+}
+
 /// A button with a square SVG `icon` to the left of `text`. The icon is sized to
 /// the button font's height so it lines up with the caption.
 pub(crate) fn icon_button(ui: &mut egui::Ui, icon: egui::ImageSource<'_>, text: &str) -> egui::Response {
     let size = ui.text_style_height(&egui::TextStyle::Button);
-    let image = egui::Image::new(icon).fit_to_exact_size(egui::Vec2::splat(size));
+    let image = egui::Image::new(icon)
+        .fit_to_exact_size(egui::Vec2::splat(size))
+        .tint(ui.visuals().text_color());
     ui.add(egui::Button::image_and_text(image, text))
 }
 
