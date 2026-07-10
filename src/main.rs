@@ -173,6 +173,8 @@ enum Nav {
 }
 
 const CONTROL_PAD: f32 = 6.0;
+/// Width of the volume slider track.
+const VOLUME_SLIDER_WIDTH: f32 = 90.0;
 /// Gap between the output filename's extension and the "Save to:" folder control.
 const SAVE_TARGET_GAP: f32 = 24.0;
 /// Cache-browser thumbnail cell size.
@@ -1422,15 +1424,8 @@ impl App {
         result
     }
 
-    /// Clip controls shown under the preview: scrub, frame step, in/out, save.
-    fn clip_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        cur: f64,
-        dur: f64,
-        nav: &mut Option<Nav>,
-        export_req: &mut Option<(Mode, &'static str)>,
-    ) {
+    /// Clip controls shown under the preview: scrub, frame step, in/out.
+    fn clip_controls(&mut self, ui: &mut egui::Ui, cur: f64, dur: f64, nav: &mut Option<Nav>) {
         ui.add_space(CONTROL_PAD);
 
         // One row with three containers: a left group and a right group that each
@@ -1528,14 +1523,37 @@ impl App {
         }
 
         ui.add_space(4.0);
-        ui.vertical_centered(|ui| {
-            ui.horizontal(|ui| {
+        let transport_h = button_height(ui);
+        let play_label = if self.playing { "⏸  Pause" } else { "▶  Play from Seeker" };
+        let play_w = text_w(ui, "▶  Play from Seeker", &btn_font) + 2.0 * pad;
+        let left_w = btn_w(ui, "⏮  Frame") + gap + play_w + gap + btn_w(ui, "Frame  ⏭");
+        let pct_w = text_w(ui, "100%", &btn_font) + 2.0 * pad;
+        let volume_w = text_w(ui, "🔊", &btn_font) + gap + VOLUME_SLIDER_WIDTH + gap + pct_w;
+
+        // Follow a pending seek target (held skip / released drag) like the
+        // playhead does, so the readout doesn't lag behind the position.
+        let shown = self.awaiting_release.map_or(cur, |(_, pos)| pos);
+        let time_readout = format!("{}  /  {}", fmt_time(shown), fmt_time(dur));
+        let time_w = text_w(ui, &time_readout, &mono_font);
+
+        let (transport_row, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), transport_h), egui::Sense::hover());
+        let transport_sub = |min_x: f32, w: f32, layout: egui::Layout| {
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_min_size(
+                    egui::pos2(min_x, transport_row.min.y),
+                    egui::vec2(w, transport_h),
+                ))
+                .layout(layout)
+        };
+
+        ui.allocate_new_ui(
+            transport_sub(transport_row.left(), left_w, egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
                 if ui.button("⏮  Frame").clicked() {
                     self.stop_play();
                     *nav = Some(Nav::Back);
                 }
-                let play_label = if self.playing { "⏸  Pause" } else { "▶  Play from Seeker" };
-                let play_w = text_w(ui, "▶  Play from Seeker", &btn_font) + 2.0 * pad;
                 if ui
                     .add(egui::Button::new(play_label).min_size(egui::vec2(play_w, 0.0)))
                     .on_hover_text("Plays from the current seeker position to the end")
@@ -1547,38 +1565,43 @@ impl App {
                     self.stop_play();
                     *nav = Some(Nav::Forward);
                 }
-                // Follow a pending seek target (held skip / released drag) like the
-                // playhead does, so the readout doesn't lag behind the position.
-                let shown = self.awaiting_release.map_or(cur, |(_, pos)| pos);
-                ui.monospace(format!("{}  /  {}", fmt_time(shown), fmt_time(dur)));
+            },
+        );
 
-                ui.separator();
-                ui.label("🔊");
-                ui.spacing_mut().slider_width = 90.0;
-                // Match the slider's value box to the button height so it lines
-                // up with the transport buttons beside it.
-                ui.spacing_mut().interact_size.y = button_height(ui);
-                let vol = ui.add(
-                    egui::Slider::new(&mut self.volume, 0.0..=1.0)
-                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+        let time_x = transport_row.center().x - time_w / 2.0;
+        ui.allocate_new_ui(
+            transport_sub(time_x, time_w, egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.monospace(time_readout);
+            },
+        );
+
+        // Added right-to-left so it reads 🔊, slider, then the fixed-width percent.
+        ui.allocate_new_ui(
+            transport_sub(transport_row.right() - volume_w, volume_w, egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                ui.add_sized(
+                    egui::vec2(pct_w, transport_h),
+                    egui::Label::new(format!("{:.0}%", self.volume * 100.0)),
                 );
+                ui.spacing_mut().slider_width = VOLUME_SLIDER_WIDTH;
+                let vol = ui.add(egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false));
                 if vol.changed() {
                     if let Some(audio) = &self.audio {
                         audio.set_volume(self.volume);
                     }
                 }
-            });
-        });
+                ui.label("🔊");
+            },
+        );
 
         ui.add_space(CONTROL_PAD);
-        ui.separator();
-        ui.add_space(CONTROL_PAD);
+    }
 
-        // Audio export on the left; video export right-aligned. Comboboxes size
-        // their content to `icon_width` while buttons don't, so they differ in
-        // height. Give the row a fixed height (so a short leading label like
-        // "Audio:" centers within it instead of pinning to the top) and one
-        // shared widget height (so buttons match the taller comboboxes).
+    /// Format pickers and Save buttons, shown above the preview under the title
+    /// row. A fixed row height keeps a short leading label like "Audio:" centered,
+    /// and one shared widget height makes buttons match the taller comboboxes.
+    fn output_controls(&mut self, ui: &mut egui::Ui, export_req: &mut Option<(Mode, &'static str)>) {
         let row_h = ui
             .text_style_height(&egui::TextStyle::Button)
             .max(ui.spacing().icon_width)
@@ -1670,7 +1693,6 @@ impl App {
                 ui.label("Video:");
             });
         });
-        ui.add_space(CONTROL_PAD);
     }
 }
 
@@ -1813,7 +1835,7 @@ impl eframe::App for App {
         if let Some((cur, dur)) = pos {
             egui::TopBottomPanel::bottom("controls")
                 .resizable(false)
-                .show(ctx, |ui| self.clip_controls(ui, cur, dur, &mut nav, &mut export_req));
+                .show(ctx, |ui| self.clip_controls(ui, cur, dur, &mut nav));
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -1860,6 +1882,11 @@ impl eframe::App for App {
                         });
                     },
                 );
+                ui.add_space(CONTROL_PAD);
+                self.output_controls(ui, &mut export_req);
+                ui.add_space(CONTROL_PAD);
+                ui.separator();
+                ui.add_space(CONTROL_PAD);
                 if let Some(name) = input.file_name() {
                     ui.weak(format!("From: {}", name.to_string_lossy()));
                 }
