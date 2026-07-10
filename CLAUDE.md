@@ -36,6 +36,7 @@ cargo run -- <path>    # launch and open a local video
 ## Conventions
 
 - **No magic numbers** — hoist literals to named `const`s, or use a library constant (e.g. `ffmpeg::ffi::AV_TIME_BASE`).
+- **Default to no comment** — code should read and be understood on its own. Make it self-documenting with explicit, descriptive names (variables, functions, consts) rather than a comment explaining a vague one. Add a comment only when the code encodes a non-obvious invariant a reader can't infer; if unsure, leave it out.
 - **Comments describe what the code does**, not why something *wasn't* done; drop dead code rather than commenting around it.
 - **No narrative comments** — a comment must stand on its own to a reader with zero history of how the code came to be. Don't narrate the development process or refer to it: no "the collapse happens a frame before the menu opens", no "we tried X but", no temporal/conversational framing ("now", "still", "previously", "as noted above"). State the rule the code follows and the invariant it relies on, in the present tense, as if the code had always been this way. E.g. prefer "A pointer press collapses the selection; restore it so the menu acts on it" over "egui clobbers the selection on press a frame before the menu opens, so grab it first".
 - **Avoid adding a crate for one small thing** — prefer std or an existing dep (e.g. `eframe::storage_dir` instead of `dirs`). New deps are fine for genuine core needs (cpal for audio, ffmpeg-the-third).

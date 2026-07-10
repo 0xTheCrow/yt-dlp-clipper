@@ -152,6 +152,8 @@ enum Nav {
 }
 
 const CONTROL_PAD: f32 = 6.0;
+/// Gap between the output filename's extension and the "Save to:" folder control.
+const SAVE_TARGET_GAP: f32 = 24.0;
 /// Cache-browser thumbnail cell size.
 const CACHE_THUMB_W: f32 = 200.0;
 const CACHE_THUMB_H: f32 = 120.0;
@@ -1725,34 +1727,52 @@ impl eframe::App for App {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Editable title (seeds the export filename).
-            if self.video_path.is_some() {
+            if let Some(input) = self.video_path.clone() {
                 let mut title = self.video_title.clone().unwrap_or_default();
                 let mut pick_output = false;
-                ui.horizontal(|ui| {
-                    ui.label("Title:");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button("Choose folder…")
-                            .on_hover_text("Folder the save dialog opens in (set a default in Settings)")
-                            .clicked()
-                        {
-                            pick_output = true;
-                        }
-                        let title_id = egui::Id::new("title_input_field");
-                        let prev_selection = text_edit_selection(ui.ctx(), title_id);
-                        let mut title_field = ui.add(
-                            egui::TextEdit::singleline(&mut title)
-                                .id(title_id)
-                                .desired_width(f32::INFINITY)
-                                .margin(INPUT_MARGIN),
-                        );
-                        attach_text_menu(ui, title_id, &mut title, &mut title_field, prev_selection);
-                        if title_field.changed() {
-                            self.video_title = Some(title);
-                        }
-                    });
-                });
+                let ext = self.video_format.extension();
+                let folder_label = match &self.output_dir {
+                    Some(d) => d
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| d.display().to_string()),
+                    None => "Choose folder…".to_owned(),
+                };
+                let folder_hover = match &self.output_dir {
+                    Some(d) => format!("Saving into {}\n(set a default in Settings)", d.display()),
+                    None => "Pick the folder to save into (set a default in Settings)".to_owned(),
+                };
+                let row_h = button_height(ui);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), row_h),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.label("Save as:");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(folder_label).on_hover_text(folder_hover).clicked() {
+                                pick_output = true;
+                            }
+                            ui.label("Save to:");
+                            ui.add_space(SAVE_TARGET_GAP);
+                            ui.label(format!(".{ext}"));
+                            let title_id = egui::Id::new("title_input_field");
+                            let prev_selection = text_edit_selection(ui.ctx(), title_id);
+                            let mut title_field = ui.add(
+                                egui::TextEdit::singleline(&mut title)
+                                    .id(title_id)
+                                    .desired_width(f32::INFINITY)
+                                    .margin(INPUT_MARGIN),
+                            );
+                            attach_text_menu(ui, title_id, &mut title, &mut title_field, prev_selection);
+                            if title_field.changed() {
+                                self.video_title = Some(title);
+                            }
+                        });
+                    },
+                );
+                if let Some(name) = input.file_name() {
+                    ui.weak(format!("From: {}", name.to_string_lossy()));
+                }
                 if pick_output {
                     if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                         self.output_dir = Some(folder);
