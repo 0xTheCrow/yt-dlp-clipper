@@ -259,15 +259,28 @@ pub(crate) fn attach_text_menu(
 /// Reveal a saved file in the system file manager, selecting it when the
 /// platform supports it and otherwise opening its containing folder.
 pub(crate) fn reveal_in_file_manager(path: &Path) {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("explorer")
-        .arg(format!("/select,{}", path.display()))
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(&path)
         .spawn();
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // Explorer parses its own command line: it needs `/select,` and the
+        // path as one unquoted token with the path itself quoted, and only
+        // accepts backslash separators. Rust's argument escaping would instead
+        // quote the whole token whenever the path contains a space, which
+        // Explorer ignores in favor of its default folder.
+        let native = path.to_string_lossy().replace('/', "\\");
+        let _ = std::process::Command::new("explorer")
+            .raw_arg(format!("/select,\"{native}\""))
+            .spawn();
+    }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let dir = path.parent().unwrap_or(path);
+        let dir = path.parent().unwrap_or(path.as_path());
         let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
     }
 }
