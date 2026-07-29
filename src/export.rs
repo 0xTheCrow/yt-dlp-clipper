@@ -114,9 +114,24 @@ pub fn export_cancellable(spec: &ExportSpec, cancel: &AtomicBool) -> Result<()> 
     ffmpeg::init()?;
     match spec.mode {
         Mode::Full => export_full(spec, cancel),
-        Mode::AudioOnly(format) => export_audio_only(spec, format, cancel),
-        Mode::Clip => export_clip(spec, cancel),
+        Mode::AudioOnly(format) => {
+            check_window(spec)?;
+            export_audio_only(spec, format, cancel)
+        }
+        Mode::Clip => {
+            check_window(spec)?;
+            export_clip(spec, cancel)
+        }
     }
+}
+
+/// A zero-length range writes a container holding no samples, which players
+/// reject as corrupt.
+fn check_window(spec: &ExportSpec) -> Result<()> {
+    if spec.end_secs <= spec.start_secs {
+        bail!("clip range is empty — set an end point after the start point");
+    }
+    Ok(())
 }
 
 /// Error out when the export has been cancelled, so the encode loop unwinds.

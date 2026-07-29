@@ -319,3 +319,39 @@ fn full_downscale_reencodes_from_copyable_source() {
     let (w, h) = run_scaled(Mode::Full, "scaled_full.mp4", 120);
     assert_eq!((w, h), (160, 120), "full should downscale to 160x120");
 }
+
+/// Export `input` over a zero-length range, returning the result unwrapped.
+fn run_empty_range(input: std::path::PathBuf, mode: Mode, out_name: &str) -> anyhow::Result<()> {
+    common::init();
+    let out = std::env::temp_dir().join(out_name);
+    let _ = std::fs::remove_file(&out);
+    export(&ExportSpec {
+        input: input.to_string_lossy().into_owned(),
+        output: out.to_string_lossy().into_owned(),
+        start_secs: 1.0,
+        end_secs: 1.0,
+        mode,
+        scale_height: None,
+        compatibility_mode: true,
+    })
+}
+
+#[test]
+fn empty_range_fails_clip_and_audio_only() {
+    // A video that fails to open leaves the clip range at zero.
+    assert!(
+        run_empty_range(h264_with_opus(), Mode::Clip, "empty_range_clip.mp4").is_err(),
+        "clip over an empty range should error"
+    );
+    assert!(
+        run_empty_range(h264_with_opus(), Mode::AudioOnly(AudioFormat::Mp3), "empty_range.mp3")
+            .is_err(),
+        "audio-only over an empty range should error"
+    );
+}
+
+#[test]
+fn empty_range_still_saves_full_video() {
+    run_empty_range(h264_with_opus(), Mode::Full, "empty_range_full.mkv")
+        .expect("full should ignore the clip range");
+}

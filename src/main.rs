@@ -1614,6 +1614,8 @@ impl App {
 
             let vid = self.video_format.extension();
             let src_height = self.decoder.as_ref().map_or(0, |d| d.height);
+            // A decode failure clears the decoder but leaves `video_path` set.
+            let is_decoder_ready = self.decoder.as_ref().is_some_and(|d| d.ready);
 
             // Left group: audio format + Save audio only.
             ui.label("Audio:");
@@ -1629,7 +1631,12 @@ impl App {
                         audio_format_label(Original),
                     );
                 });
-            if icon_button(ui, save_icon(), "Save audio only…").clicked() {
+            let save_audio = ui
+                .add_enabled_ui(is_decoder_ready, |ui| {
+                    icon_button(ui, save_icon(), "Save audio only…")
+                })
+                .inner;
+            if save_audio.clicked() {
                 let fmt = self.audio_format;
                 let ext = self
                     .video_path
@@ -1643,10 +1650,20 @@ impl App {
             // Right group, added right-to-left so it reads: Video, Resolution,
             // Save full video, Save clip.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icon_button(ui, save_icon(), "Save clip…").clicked() {
+                let save_clip = ui
+                    .add_enabled_ui(is_decoder_ready, |ui| {
+                        icon_button(ui, save_icon(), "Save clip…")
+                    })
+                    .inner;
+                if save_clip.clicked() {
                     *export_req = Some((Mode::Clip, vid));
                 }
-                if icon_button(ui, save_icon(), "Save full video…").clicked() {
+                let save_full = ui
+                    .add_enabled_ui(is_decoder_ready, |ui| {
+                        icon_button(ui, save_icon(), "Save full video…")
+                    })
+                    .inner;
+                if save_full.clicked() {
                     *export_req = Some((Mode::Full, vid));
                 }
 
