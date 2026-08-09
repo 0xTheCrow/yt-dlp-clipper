@@ -47,18 +47,44 @@ const EXPORT_HEIGHT_LADDER: [u32; 8] = [2160, 1440, 1080, 720, 480, 360, 240, 14
 
 /// Seconds skipped by the skip-back / skip-forward keys.
 const SKIP_SECS: f64 = 5.0;
-/// Cap on retained clip-range edits per undo/redo stack.
-const CLIP_HISTORY_LIMIT: usize = 128;
+/// Cap on retained clip-range edits per undo/redo stack. Every zoom-window
+/// placement is an undoable step, so browsing draws on it as well as editing.
+const CLIP_HISTORY_LIMIT: usize = 1024;
+/// Shortest span the zoom window or the clip may be narrowed to.
+const MIN_RANGE_SECS: f64 = 0.05;
+/// Half-width of the pointer zone that grabs a drag handle.
+const HANDLE_GRAB_RADIUS: f32 = 10.0;
+/// Visible span multiplier per unit of scroll over the timeline.
+const SCROLL_ZOOM_RATE: f32 = 0.0015;
+/// Idle gap that closes a scroll-zoom gesture.
+const SCROLL_GESTURE_IDLE_SECS: f64 = 0.4;
 /// Held nav key: how long before auto-repeat begins, then the interval between
 /// repeats (seconds). Keeps a held key from firing too fast.
 const NAV_REPEAT_DELAY: f64 = 0.3;
 const NAV_REPEAT_INTERVAL: f64 = 0.1;
 
-/// A snapshot of the clip in/out points, retained for undo/redo.
-#[derive(Clone, Copy)]
+/// Narrowing the zoom window trims the clip, so both restore together.
+#[derive(Clone, Copy, PartialEq)]
 struct ClipRange {
     in_secs: f64,
     out_secs: f64,
+    view_start_secs: f64,
+    view_end_secs: f64,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum WindowDrag {
+    Start,
+    End,
+    Pan { grab_offset_secs: f64 },
+    Draw { anchor_secs: f64 },
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TimelineDrag {
+    In,
+    Out,
+    Playhead,
 }
 
 /// Inner margin for text input fields. Vertical padding is kept small so inputs
@@ -209,6 +235,12 @@ struct App {
     frame_tex: Option<egui::TextureHandle>,
     in_secs: f64,
     out_secs: f64,
+    view_start_secs: f64,
+    view_end_secs: f64,
+    pending_undo_range: Option<ClipRange>,
+    scroll_gesture_commit_at: Option<f64>,
+    window_drag: Option<WindowDrag>,
+    timeline_drag: Option<TimelineDrag>,
     undo_stack: Vec<ClipRange>,
     redo_stack: Vec<ClipRange>,
 
@@ -304,6 +336,12 @@ impl Default for App {
             frame_tex: None,
             in_secs: 0.0,
             out_secs: 0.0,
+            view_start_secs: 0.0,
+            view_end_secs: 0.0,
+            pending_undo_range: None,
+            scroll_gesture_commit_at: None,
+            window_drag: None,
+            timeline_drag: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             ui_scale: 1.0,
@@ -440,15 +478,76 @@ impl App {
         self.download_dir.clone().unwrap_or_else(managed_cache_dir)
     }
 
-    fn record_clip_edit(&mut self) {
-        self.undo_stack.push(ClipRange { in_secs: self.in_secs, out_secs: self.out_secs });
+    fn clip_range(&self) -> ClipRange {
+        ClipRange {
+            in_secs: self.in_secs,
+            out_secs: self.out_secs,
+            view_start_secs: self.view_start_secs,
+            view_end_secs: self.view_end_secs,
+        }
+    }
+
+    fn restore_clip_range(&mut self, range: ClipRange) {
+        self.in_secs = range.in_secs;
+        self.out_secs = range.out_secs;
+        self.view_start_secs = range.view_start_secs;
+        self.view_end_secs = range.view_end_secs;
+    }
+
+    fn push_undo(&mut self, range: ClipRange) {
+        self.undo_stack.push(range);
         if self.undo_stack.len() > CLIP_HISTORY_LIMIT {
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
     }
 
+    fn record_clip_edit(&mut self) {
+        let range = self.clip_range();
+        self.push_undo(range);
+    }
+
+    fn begin_gesture(&mut self) {
+        if self.pending_undo_range.is_none() {
+            self.pending_undo_range = Some(self.clip_range());
+        }
+    }
+
+    fn commit_gesture(&mut self) {
+        if let Some(range) = self.pending_undo_range.take() {
+            if range != self.clip_range() {
+                self.push_undo(range);
+            }
+        }
+    }
+
+    fn commit_abandoned_gesture(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        self.window_drag = None;
+        self.timeline_drag = None;
+        if self.scroll_gesture_commit_at.is_none() {
+            self.commit_gesture();
+        }
+    }
+
+    fn clamped_in_secs(&self, secs: f64) -> f64 {
+        secs.min(self.out_secs - MIN_RANGE_SECS).max(0.0)
+    }
+
+    fn clamped_out_secs(&self, secs: f64) -> f64 {
+        secs.max(self.in_secs + MIN_RANGE_SECS)
+    }
+
+    fn set_view(&mut self, start_secs: f64, end_secs: f64, dur: f64) {
+        let span = (end_secs - start_secs).clamp(MIN_RANGE_SECS.min(dur), dur);
+        self.view_start_secs = start_secs.clamp(0.0, (dur - span).max(0.0));
+        self.view_end_secs = self.view_start_secs + span;
+    }
+
     fn set_in_secs(&mut self, secs: f64) {
+        let secs = self.clamped_in_secs(secs);
         if self.in_secs != secs {
             self.record_clip_edit();
             self.in_secs = secs;
@@ -456,6 +555,7 @@ impl App {
     }
 
     fn set_out_secs(&mut self, secs: f64) {
+        let secs = self.clamped_out_secs(secs);
         if self.out_secs != secs {
             self.record_clip_edit();
             self.out_secs = secs;
@@ -464,23 +564,25 @@ impl App {
 
     fn undo_clip_edit(&mut self) {
         if let Some(range) = self.undo_stack.pop() {
-            self.redo_stack.push(ClipRange { in_secs: self.in_secs, out_secs: self.out_secs });
-            self.in_secs = range.in_secs;
-            self.out_secs = range.out_secs;
+            let current = self.clip_range();
+            self.redo_stack.push(current);
+            self.restore_clip_range(range);
         }
     }
 
     fn redo_clip_edit(&mut self) {
         if let Some(range) = self.redo_stack.pop() {
-            self.undo_stack.push(ClipRange { in_secs: self.in_secs, out_secs: self.out_secs });
-            self.in_secs = range.in_secs;
-            self.out_secs = range.out_secs;
+            let current = self.clip_range();
+            self.undo_stack.push(current);
+            self.restore_clip_range(range);
         }
     }
 
     fn clear_clip_history(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.pending_undo_range = None;
+        self.scroll_gesture_commit_at = None;
     }
 
     fn reset_for_new_video(&mut self) {
@@ -492,6 +594,10 @@ impl App {
         self.frame_tex = None;
         self.in_secs = 0.0;
         self.out_secs = 0.0;
+        self.view_start_secs = 0.0;
+        self.view_end_secs = 0.0;
+        self.window_drag = None;
+        self.timeline_drag = None;
         self.clear_clip_history();
         self.nav_repeat_at = [0.0; 4];
         self.play_start_wall = 0.0;
@@ -670,6 +776,8 @@ impl App {
             }
             self.in_secs = 0.0;
             self.out_secs = duration_secs;
+            self.view_start_secs = 0.0;
+            self.view_end_secs = duration_secs;
             self.clear_clip_history();
         }
         if let Some((image, secs)) = latest_frame {
@@ -1356,10 +1464,136 @@ impl App {
         });
     }
 
-    /// Paint the timeline: dimmed outside the clip, highlighted in [in, out],
-    /// with in/out markers and a playhead. Returns `(target, released)` while
-    /// the timeline is clicked or dragged; `released` is true on click/release.
-    fn draw_timeline(&self, ui: &mut egui::Ui, cur: f64, dur: f64) -> Option<(f64, bool)> {
+    /// Paint the whole video as a strip with the zoom window outlined on it, and
+    /// handle dragging that window's edges (resize) or body (pan).
+    fn draw_overview_bar(&mut self, ui: &mut egui::Ui, dur: f64) {
+        const HEIGHT: f32 = 12.0;
+        const ROUNDING: f32 = 3.0;
+        let dur = dur.max(f64::EPSILON);
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), HEIGHT),
+            egui::Sense::click_and_drag(),
+        );
+        let painter = ui.painter_at(rect);
+        let visuals = ui.visuals();
+        let width = rect.width().max(f32::EPSILON);
+        let x_at = |t: f64| rect.left() + (t / dur).clamp(0.0, 1.0) as f32 * width;
+        let t_at = |x: f32| ((x - rect.left()) / width).clamp(0.0, 1.0) as f64 * dur;
+
+        let start_x = x_at(self.view_start_secs);
+        let end_x = x_at(self.view_end_secs);
+        let grabbed_edge = |x: f32| {
+            let start_distance = (x - start_x).abs();
+            let end_distance = (x - end_x).abs();
+            if start_distance > HANDLE_GRAB_RADIUS && end_distance > HANDLE_GRAB_RADIUS {
+                None
+            } else if start_distance <= end_distance {
+                Some(WindowDrag::Start)
+            } else {
+                Some(WindowDrag::End)
+            }
+        };
+
+        let is_spanning_whole_video = self.view_end_secs - self.view_start_secs >= dur;
+        if response.drag_started() {
+            // A drag is only recognised once the pointer leaves the press point,
+            // so the gesture is chosen from where the press landed rather than
+            // from a position that has already drifted off the handle.
+            let press_pos = ui
+                .ctx()
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| response.interact_pointer_pos());
+            if let Some(pos) = press_pos {
+                let is_inside_window = pos.x > start_x && pos.x < end_x;
+                self.window_drag = Some(match grabbed_edge(pos.x) {
+                    Some(edge) => edge,
+                    None if is_inside_window && !is_spanning_whole_video => WindowDrag::Pan {
+                        grab_offset_secs: t_at(pos.x) - self.view_start_secs,
+                    },
+                    None => WindowDrag::Draw { anchor_secs: t_at(pos.x) },
+                });
+                self.begin_gesture();
+            }
+        }
+        if let (Some(drag), Some(pos)) = (self.window_drag, response.interact_pointer_pos()) {
+            let t = t_at(pos.x);
+            match drag {
+                WindowDrag::Start => {
+                    self.set_view(t.min(self.view_end_secs - MIN_RANGE_SECS), self.view_end_secs, dur)
+                }
+                WindowDrag::End => {
+                    self.set_view(self.view_start_secs, t.max(self.view_start_secs + MIN_RANGE_SECS), dur)
+                }
+                WindowDrag::Pan { grab_offset_secs } => {
+                    let span = self.view_end_secs - self.view_start_secs;
+                    self.set_view(t - grab_offset_secs, t - grab_offset_secs + span, dur);
+                }
+                WindowDrag::Draw { anchor_secs } => {
+                    self.set_view(anchor_secs.min(t), anchor_secs.max(t), dur)
+                }
+            }
+        }
+        if response.drag_stopped() {
+            self.commit_gesture();
+            self.window_drag = None;
+        }
+        if let Some(pos) = response.hover_pos() {
+            let is_inside_window = pos.x > start_x && pos.x < end_x;
+            ui.ctx().set_cursor_icon(match grabbed_edge(pos.x) {
+                Some(_) => egui::CursorIcon::ResizeHorizontal,
+                None if is_inside_window && !is_spanning_whole_video => egui::CursorIcon::Grab,
+                None => egui::CursorIcon::Crosshair,
+            });
+        }
+
+        let start_x = x_at(self.view_start_secs);
+        let end_x = x_at(self.view_end_secs);
+        painter.rect_filled(rect, egui::Rounding::same(ROUNDING), visuals.extreme_bg_color);
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(x_at(self.in_secs), rect.top()),
+                egui::pos2(x_at(self.out_secs), rect.bottom()),
+            ),
+            egui::Rounding::ZERO,
+            visuals.selection.bg_fill,
+        );
+        let dim = egui::Color32::from_black_alpha(120);
+        painter.rect_filled(
+            egui::Rect::from_min_max(rect.left_top(), egui::pos2(start_x, rect.bottom())),
+            egui::Rounding::ZERO,
+            dim,
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(end_x, rect.top()), rect.right_bottom()),
+            egui::Rounding::ZERO,
+            dim,
+        );
+        painter.rect_stroke(
+            egui::Rect::from_min_max(egui::pos2(start_x, rect.top()), egui::pos2(end_x, rect.bottom())),
+            egui::Rounding::same(ROUNDING),
+            egui::Stroke::new(2.0, visuals.strong_text_color()),
+        );
+        const GRIP_WIDTH: f32 = 4.0;
+        for edge_x in [start_x, end_x] {
+            let center_x =
+                edge_x.clamp(rect.left() + GRIP_WIDTH / 2.0, rect.right() - GRIP_WIDTH / 2.0);
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(center_x - GRIP_WIDTH / 2.0, rect.top()),
+                    egui::pos2(center_x + GRIP_WIDTH / 2.0, rect.bottom()),
+                ),
+                egui::Rounding::same(GRIP_WIDTH / 2.0),
+                visuals.strong_text_color(),
+            );
+        }
+        response.on_hover_text("Drag to set the zoom range. Scroll over the timeline to zoom.");
+    }
+
+    /// Paint the zoom window's span of the timeline: dimmed outside the clip,
+    /// highlighted in [in, out], with draggable in/out markers and a playhead.
+    /// Returns `(target, released)` while the timeline is clicked or dragged for
+    /// a seek; `released` is true on click/release.
+    fn draw_timeline(&mut self, ui: &mut egui::Ui, cur: f64, dur: f64) -> Option<(f64, bool)> {
         const HEIGHT: f32 = 28.0;
         let dur = dur.max(f64::EPSILON);
         let (rect, response) = ui.allocate_exact_size(
@@ -1368,7 +1602,89 @@ impl App {
         );
         let painter = ui.painter_at(rect);
         let visuals = ui.visuals();
-        let x_at = |t: f64| rect.left() + (t / dur).clamp(0.0, 1.0) as f32 * rect.width();
+
+        let scroll_y = if response.hovered() {
+            ui.input(|i| i.smooth_scroll_delta.y)
+        } else {
+            0.0
+        };
+        if let (true, Some(pos)) = (scroll_y != 0.0, response.hover_pos()) {
+            let span = (self.view_end_secs - self.view_start_secs).max(MIN_RANGE_SECS);
+            let fraction =
+                ((pos.x - rect.left()) / rect.width().max(f32::EPSILON)).clamp(0.0, 1.0) as f64;
+            let focus_secs = self.view_start_secs + fraction * span;
+            let zoomed_span = span * (-scroll_y * SCROLL_ZOOM_RATE).exp() as f64;
+            self.begin_gesture();
+            self.set_view(focus_secs - fraction * zoomed_span, focus_secs + (1.0 - fraction) * zoomed_span, dur);
+            self.scroll_gesture_commit_at =
+                Some(ui.input(|i| i.time) + SCROLL_GESTURE_IDLE_SECS);
+        }
+
+        let view_start = self.view_start_secs;
+        let span = (self.view_end_secs - self.view_start_secs).max(MIN_RANGE_SECS);
+        let width = rect.width().max(f32::EPSILON);
+        let x_at =
+            |t: f64| rect.left() + ((t - view_start) / span).clamp(0.0, 1.0) as f32 * width;
+        let t_at =
+            |x: f32| view_start + ((x - rect.left()) / width).clamp(0.0, 1.0) as f64 * span;
+
+        let view = view_start..=view_start + span;
+        let is_in_visible = view.contains(&self.in_secs);
+        let is_out_visible = view.contains(&self.out_secs);
+        let grabbed_in_x = x_at(self.in_secs);
+        let grabbed_out_x = x_at(self.out_secs);
+        let grabbed_marker = |x: f32| {
+            let in_distance =
+                if is_in_visible { (x - grabbed_in_x).abs() } else { f32::INFINITY };
+            let out_distance =
+                if is_out_visible { (x - grabbed_out_x).abs() } else { f32::INFINITY };
+            if in_distance > HANDLE_GRAB_RADIUS && out_distance > HANDLE_GRAB_RADIUS {
+                None
+            } else if in_distance <= out_distance {
+                Some(TimelineDrag::In)
+            } else {
+                Some(TimelineDrag::Out)
+            }
+        };
+        if response.drag_started() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let grabbed = grabbed_marker(pos.x);
+                self.timeline_drag = Some(grabbed.unwrap_or(TimelineDrag::Playhead));
+                if grabbed.is_some() {
+                    self.begin_gesture();
+                }
+            }
+        }
+        if let Some(pos) = response.hover_pos() {
+            if grabbed_marker(pos.x).is_some() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+        }
+
+        let mut result = None;
+        let mut live_pos = None;
+        let is_dragging_marker =
+            matches!(self.timeline_drag, Some(TimelineDrag::In) | Some(TimelineDrag::Out));
+        if is_dragging_marker {
+            if let (Some(drag), Some(pos)) = (self.timeline_drag, response.interact_pointer_pos()) {
+                let t = t_at(pos.x);
+                match drag {
+                    TimelineDrag::In => self.in_secs = self.clamped_in_secs(t),
+                    TimelineDrag::Out => self.out_secs = self.clamped_out_secs(t),
+                    TimelineDrag::Playhead => {}
+                }
+            }
+        } else if response.dragged() || response.clicked() || response.drag_stopped() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let t = t_at(pos.x);
+                live_pos = Some(t);
+                result = Some((t, response.drag_stopped() || response.clicked()));
+            }
+        }
+        if response.drag_stopped() {
+            self.commit_gesture();
+            self.timeline_drag = None;
+        }
 
         let in_x = x_at(self.in_secs);
         let out_x = x_at(self.out_secs);
@@ -1398,17 +1714,11 @@ impl App {
         );
 
         let marker = egui::Stroke::new(2.0, visuals.selection.stroke.color);
-        painter.vline(in_x, rect.y_range(), marker);
-        painter.vline(out_x, rect.y_range(), marker);
-
-        let mut result = None;
-        let mut live_pos = None;
-        if response.dragged() || response.clicked() || response.drag_stopped() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * dur;
-                live_pos = Some(t);
-                result = Some((t, response.drag_stopped() || response.clicked()));
-            }
+        if is_in_visible {
+            painter.vline(in_x, rect.y_range(), marker);
+        }
+        if is_out_visible {
+            painter.vline(out_x, rect.y_range(), marker);
         }
 
         // Playhead: follow the cursor while interacting, hold at a pending
@@ -1416,11 +1726,13 @@ impl App {
         let playhead = live_pos
             .or_else(|| self.awaiting_release.map(|(_, pos)| pos))
             .unwrap_or(cur);
-        painter.vline(
-            x_at(playhead),
-            rect.y_range(),
-            egui::Stroke::new(2.0, visuals.strong_text_color()),
-        );
+        if (view_start..=view_start + span).contains(&playhead) {
+            painter.vline(
+                x_at(playhead),
+                rect.y_range(),
+                egui::Stroke::new(2.0, visuals.strong_text_color()),
+            );
+        }
         result
     }
 
@@ -1517,6 +1829,8 @@ impl App {
         );
 
         ui.add_space(4.0);
+        self.draw_overview_bar(ui, dur);
+        ui.add_space(2.0);
         if let Some((t, released)) = self.draw_timeline(ui, cur, dur) {
             self.stop_play();
             *nav = Some(Nav::Seek { secs: t, released });
@@ -1752,6 +2066,11 @@ impl eframe::App for App {
         let ready = self.decoder.as_ref().is_some_and(|d| d.ready);
         let now = ctx.input(|i| i.time);
 
+        if self.scroll_gesture_commit_at.is_some_and(|deadline| now >= deadline) {
+            self.scroll_gesture_commit_at = None;
+            self.commit_gesture();
+        }
+
         // Clip + playback shortcuts, unless a text field has focus or Settings is
         // capturing a key. Set start/end mirror the buttons' position guards.
         if ready && self.rebinding.is_none() && !ctx.wants_keyboard_input() {
@@ -1960,5 +2279,7 @@ impl eframe::App for App {
         if let Some((mode, ext)) = export_req {
             self.start_export(mode, ext);
         }
+
+        self.commit_abandoned_gesture(ctx);
     }
 }
