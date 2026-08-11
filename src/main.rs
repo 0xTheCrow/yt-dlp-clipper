@@ -6,16 +6,20 @@ mod keybinds;
 mod theme;
 mod widgets;
 
+use ffmpeg_the_third as ffmpeg;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 use yt_dlp_clipper::audio::AudioPlayer;
 use yt_dlp_clipper::export::{self, ExportSpec, Mode};
+use yt_dlp_clipper::updater;
 use yt_dlp_clipper::ytdlp;
 
-use binaries::{clear_dir, dir_size, managed_cache_dir, resolve_ffmpeg, resolve_ytdlp};
+use binaries::{
+    clear_dir, dir_size, managed_cache_dir, reset_bundled_tools, resolve_ffmpeg, resolve_ytdlp,
+};
 use cache::{cache_thumbnails, is_video_file, CacheEntry, CacheThumb};
 use decoder_thread::{DecodeEvent, DecoderHandle};
 use format::{audio_format_label, fmt_duration, fmt_size, fmt_time, sanitize_filename};
@@ -30,6 +34,10 @@ use widgets::{
 /// On-disk identifier for the app-data dir (settings + download cache). Kept
 /// generic and stable so renaming the app doesn't orphan persisted state.
 pub(crate) const STORAGE_APP_ID: &str = "yt-dlp-clipper";
+
+/// User-facing name, matching the window title, the desktop entry, and the
+/// `.app` bundle.
+const APP_DISPLAY_NAME: &str = "Cooper Clipper";
 
 const SCALE_STORAGE_KEY: &str = "ui_scale";
 const DOWNLOAD_DIR_KEY: &str = "download_dir";
@@ -96,6 +104,19 @@ const INPUT_MARGIN: egui::Margin = egui::Margin {
     bottom: 4.0,
 };
 
+/// Runs the non-GUI startup path and exits, so a downloaded build can prove it
+/// loads its libraries on this machine before it replaces the installed one.
+const SELF_TEST_FLAG: &str = "--self-test";
+
+/// Exercise the startup work that depends on the host: the tool binaries the
+/// caller has already resolved, and linking against libav*. A non-zero exit
+/// marks the build unusable here.
+fn self_test() -> eframe::Result<()> {
+    ffmpeg::init().map_err(|e| eframe::Error::AppCreation(Box::new(e)))?;
+    println!("yt-dlp-clipper {} self-test ok", env!("CARGO_PKG_VERSION"));
+    Ok(())
+}
+
 fn main() -> eframe::Result<()> {
     // Resolve the tool binaries to absolute paths up front (seeding yt-dlp into a
     // writable managed copy) so we never invoke a bare name the OS could resolve
@@ -107,10 +128,16 @@ fn main() -> eframe::Result<()> {
         ytdlp::set_ffmpeg(ffmpeg_bin);
     }
 
-    let cli_path = std::env::args().nth(1);
+    let mut cli_path = None;
+    for arg in std::env::args().skip(1) {
+        if arg == SELF_TEST_FLAG {
+            return self_test();
+        }
+        cli_path.get_or_insert(arg);
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Cooper Clipper")
+            .with_title(APP_DISPLAY_NAME)
             .with_inner_size([960.0, 720.0])
             .with_min_inner_size([800.0, 480.0]),
         ..Default::default()
@@ -186,9 +213,16 @@ enum Msg {
     /// Export aborted via Cancel; carries the partial output path to delete.
     ExportCanceled(PathBuf),
     Error(String),
-    /// Result of a background `yt-dlp -U`: `Ok` carries yt-dlp's report,
-    /// `Err` its failure text.
-    YtdlpUpdated(Result<String, String>),
+}
+
+/// Where the app-update check stands; drives the Settings button and its caption.
+#[derive(Clone)]
+enum UpdateState {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(updater::AvailableRelease),
+    Failed(String),
 }
 
 /// A preview navigation requested by the UI, applied after widget borrows end.
@@ -226,6 +260,13 @@ struct App {
     /// Cached `yt-dlp --version` for the Settings panel; fetched lazily, and
     /// cleared after an update so it refetches.
     ytdlp_version: Option<String>,
+    /// Carries `yt-dlp -U`'s report. Settings actions get channels of their own:
+    /// `spawn` replaces `rx`, which would orphan a download or export reporting
+    /// on it.
+    ytdlp_update_rx: Option<Receiver<Result<String, String>>>,
+    /// Outcome of the last app-update check, shown in Settings.
+    update_state: UpdateState,
+    update_rx: Option<Receiver<Result<Option<updater::AvailableRelease>, String>>>,
     rx: Option<Receiver<Msg>>,
 
     decoder: Option<DecoderHandle>,
@@ -329,6 +370,9 @@ impl Default for App {
             last_error: None,
             ytdlp_updating: false,
             ytdlp_version: None,
+            ytdlp_update_rx: None,
+            update_state: UpdateState::Idle,
+            update_rx: None,
             rx: None,
             decoder: None,
             video_path: None,
@@ -390,6 +434,13 @@ impl App {
         thread::spawn(move || work(tx));
     }
 
+    /// True while a fetch, download, or export still holds `rx`. Starting
+    /// another would replace the receiver and strand the running one, which
+    /// keeps working but can no longer report.
+    fn is_worker_busy(&self) -> bool {
+        self.rx.is_some()
+    }
+
     fn poll(&mut self) {
         let Some(rx) = self.rx.take() else { return };
         loop {
@@ -449,18 +500,6 @@ impl App {
                     self.progress = None;
                     self.exporting = false;
                     self.export_path = None;
-                    return;
-                }
-                Ok(Msg::YtdlpUpdated(result)) => {
-                    self.ytdlp_updating = false;
-                    self.ytdlp_version = None;
-                    match result {
-                        Ok(report) => {
-                            self.status = format!("yt-dlp: {report}");
-                            self.last_error = None;
-                        }
-                        Err(e) => self.last_error = Some(e),
-                    }
                     return;
                 }
                 // Worker still running: keep the receiver for the next frame.
@@ -977,16 +1016,63 @@ impl App {
         });
     }
 
-    /// Run `yt-dlp -U` on a worker thread; the result arrives as `YtdlpUpdated`.
+    /// Run `yt-dlp -U` on a worker thread.
     fn start_ytdlp_update(&mut self) {
         if self.ytdlp_updating {
             return;
         }
         self.ytdlp_updating = true;
         self.status = "updating yt-dlp…".into();
-        self.spawn(|tx| {
-            let _ = tx.send(Msg::YtdlpUpdated(ytdlp::update().map_err(|e| e.to_string())));
+        let (tx, rx) = channel();
+        self.ytdlp_update_rx = Some(rx);
+        thread::spawn(move || {
+            let _ = tx.send(ytdlp::update().map_err(|e| e.to_string()));
         });
+    }
+
+    fn poll_ytdlp_update(&mut self) {
+        let Some(rx) = self.ytdlp_update_rx.take() else { return };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.ytdlp_updating = false;
+                self.ytdlp_version = None;
+                match result {
+                    Ok(report) => {
+                        self.status = format!("yt-dlp: {report}");
+                        self.last_error = None;
+                    }
+                    Err(error) => self.last_error = Some(error),
+                }
+            }
+            Err(TryRecvError::Empty) => self.ytdlp_update_rx = Some(rx),
+            Err(TryRecvError::Disconnected) => self.ytdlp_updating = false,
+        }
+    }
+
+    /// Query GitHub for a newer release on a worker thread.
+    fn start_update_check(&mut self) {
+        if matches!(self.update_state, UpdateState::Checking) {
+            return;
+        }
+        self.update_state = UpdateState::Checking;
+        let (tx, rx) = channel();
+        self.update_rx = Some(rx);
+        thread::spawn(move || {
+            let _ = tx.send(updater::check().map_err(|e| e.to_string()));
+        });
+    }
+
+    fn poll_update_check(&mut self) {
+        let Some(rx) = self.update_rx.take() else { return };
+        match rx.try_recv() {
+            Ok(Ok(Some(release))) => self.update_state = UpdateState::Available(release),
+            Ok(Ok(None)) => self.update_state = UpdateState::UpToDate,
+            Ok(Err(error)) => self.update_state = UpdateState::Failed(error),
+            Err(TryRecvError::Empty) => self.update_rx = Some(rx),
+            Err(TryRecvError::Disconnected) => {
+                self.update_state = UpdateState::Failed("the update check stopped".into())
+            }
+        }
     }
 
     /// Show the last failure (full yt-dlp/export text) with Copy/Dismiss and,
@@ -1064,6 +1150,9 @@ impl App {
         let ytdlp_version = self.ytdlp_version.clone().unwrap_or_default();
         let ytdlp_updating = self.ytdlp_updating;
         let mut start_update = false;
+        let mut reset_tools = false;
+        let mut start_update_check = false;
+        let update_state = self.update_state.clone();
 
         egui::Window::new("Settings")
             .open(&mut self.show_settings)
@@ -1222,10 +1311,58 @@ impl App {
                     });
                 });
                 ui.small("Update fixes most download failures when a site changes.");
+
+                ui.add_space(SECTION_GAP);
+                ui.horizontal(|ui| {
+                    ui.label("Bundled tools");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Reset").clicked() {
+                            reset_tools = true;
+                        }
+                    });
+                });
+                ui.small("Reinstall the yt-dlp and ffmpeg copies shipped with the app. Takes effect on restart.");
+
+                ui.add_space(SECTION_GAP);
+                ui.separator();
+                ui.add_space(SECTION_GAP);
+                ui.label(APP_DISPLAY_NAME);
+                ui.horizontal(|ui| {
+                    ui.label(format!("Version: {}", env!("CARGO_PKG_VERSION")));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let is_checking = matches!(&update_state, UpdateState::Checking);
+                        let label = if is_checking { "Checking…" } else { "Check for updates" };
+                        if ui.add_enabled(!is_checking, egui::Button::new(label)).clicked() {
+                            start_update_check = true;
+                        }
+                    });
+                });
+                match &update_state {
+                    UpdateState::Idle | UpdateState::Checking => {}
+                    UpdateState::UpToDate => {
+                        ui.small("Up to date.");
+                    }
+                    UpdateState::Available(release) => {
+                        ui.horizontal(|ui| {
+                            ui.small(format!("Version {} is available.", release.version));
+                            ui.hyperlink_to("Open release page", &release.page_url);
+                        });
+                    }
+                    UpdateState::Failed(error) => {
+                        ui.colored_label(egui::Color32::LIGHT_RED, format!("Check failed: {error}"));
+                    }
+                }
             });
 
         if start_update {
             self.start_ytdlp_update();
+        }
+        if reset_tools {
+            reset_bundled_tools();
+            self.status = "bundled tools reset — restart to reinstall them".into();
+        }
+        if start_update_check {
+            self.start_update_check();
         }
         self.pending_scale = pending;
         if let Some(scale) = apply_to {
@@ -1273,6 +1410,7 @@ impl App {
 
     /// Top toolbar: URL/download, format picker, settings.
     fn toolbar(&mut self, ctx: &egui::Context) {
+        let is_worker_busy = self.is_worker_busy();
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.add_space(4.0);
             // Fixed-height row so the label, field, and buttons all center
@@ -1295,8 +1433,12 @@ impl App {
                     attach_text_menu(ui, url_id, &mut self.url, &mut url_field, prev_selection);
                     let submitted =
                         url_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let fetch = icon_button(ui, download_icon(), "Fetch");
-                    if (fetch.clicked() || submitted) && !self.url.is_empty() {
+                    let fetch = ui
+                        .add_enabled_ui(!is_worker_busy, |ui| {
+                            icon_button(ui, download_icon(), "Fetch")
+                        })
+                        .inner;
+                    if (fetch.clicked() || submitted) && !is_worker_busy && !self.url.is_empty() {
                         let url = self.url.clone();
                         self.reset_for_new_video();
                         self.info = None;
@@ -1371,7 +1513,10 @@ impl App {
                             }
                         });
 
-                    if ui.button("Download").clicked() {
+                    if ui
+                        .add_enabled(!is_worker_busy, egui::Button::new("Download"))
+                        .clicked()
+                    {
                         let selector = ytdlp::resolution_selector(
                             self.selected_height,
                             self.want_video,
@@ -1930,6 +2075,7 @@ impl App {
             let src_height = self.decoder.as_ref().map_or(0, |d| d.height);
             // A decode failure clears the decoder but leaves `video_path` set.
             let is_decoder_ready = self.decoder.as_ref().is_some_and(|d| d.ready);
+            let can_export = is_decoder_ready && !self.is_worker_busy();
 
             // Left group: audio format + Save audio only.
             ui.label("Audio:");
@@ -1946,7 +2092,7 @@ impl App {
                     );
                 });
             let save_audio = ui
-                .add_enabled_ui(is_decoder_ready, |ui| {
+                .add_enabled_ui(can_export, |ui| {
                     icon_button(ui, save_icon(), "Save audio only…")
                 })
                 .inner;
@@ -1965,7 +2111,7 @@ impl App {
             // Save full video, Save clip.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let save_clip = ui
-                    .add_enabled_ui(is_decoder_ready, |ui| {
+                    .add_enabled_ui(can_export, |ui| {
                         icon_button(ui, save_icon(), "Save clip…")
                     })
                     .inner;
@@ -1973,7 +2119,7 @@ impl App {
                     *export_req = Some((Mode::Clip, vid));
                 }
                 let save_full = ui
-                    .add_enabled_ui(is_decoder_ready, |ui| {
+                    .add_enabled_ui(can_export, |ui| {
                         icon_button(ui, save_icon(), "Save full video…")
                     })
                     .inner;
@@ -2059,6 +2205,8 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
+        self.poll_ytdlp_update();
+        self.poll_update_check();
         self.poll_decoder(ctx);
         self.poll_cache(ctx);
         ctx.request_repaint();
