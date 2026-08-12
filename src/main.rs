@@ -60,6 +60,9 @@ const SKIP_SECS: f64 = 5.0;
 const CLIP_HISTORY_LIMIT: usize = 1024;
 /// Shortest span the zoom window or the clip may be narrowed to.
 const MIN_RANGE_SECS: f64 = 0.05;
+/// Frame rate reported for an audio-only source, which has no frames of its
+/// own. It only sets the granularity of the seconds-to-timeline arithmetic.
+const AUDIO_ONLY_FPS: f64 = 30.0;
 /// Half-width of the pointer zone that grabs a drag handle.
 const HANDLE_GRAB_RADIUS: f32 = 10.0;
 /// Visible span multiplier per unit of scroll over the timeline.
@@ -70,6 +73,17 @@ const SCROLL_GESTURE_IDLE_SECS: f64 = 0.4;
 /// repeats (seconds). Keeps a held key from firing too fast.
 const NAV_REPEAT_DELAY: f64 = 0.3;
 const NAV_REPEAT_INTERVAL: f64 = 0.1;
+
+/// Metadata from the decoder thread for a newly opened source, flattening the
+/// video and audio-only open events into the one shape the UI applies.
+#[derive(Clone, Copy)]
+struct OpenedSource {
+    width: u32,
+    height: u32,
+    duration_secs: f64,
+    fps: f64,
+    has_video: bool,
+}
 
 /// Narrowing the zoom window trims the clip, so both restore together.
 #[derive(Clone, Copy, PartialEq)]
@@ -684,14 +698,22 @@ impl App {
             return;
         };
         let target = (base + delta).clamp(0.0, dur);
+        if !self.has_video_stream() {
+            self.move_audio_only_playhead(target);
+            return;
+        }
         self.stop_play();
         if let Some(gen) = self.decoder.as_ref().map(|dec| dec.seek_secs(target)) {
             self.awaiting_release = Some((gen, target));
         }
     }
 
-    /// Step exactly one frame forward or backward.
+    /// Step exactly one frame forward or backward. An audio-only source has no
+    /// frames to land on, so stepping does nothing there.
     fn step_frame(&mut self, forward: bool) {
+        if !self.has_video_stream() {
+            return;
+        }
         self.stop_play();
         if let Some(dec) = self.decoder.as_ref() {
             if forward {
@@ -699,6 +721,23 @@ impl App {
             } else {
                 dec.step_backward();
             }
+        }
+    }
+
+    /// True while the open source has a video stream. False for an audio-only
+    /// file, which still gets a timeline and an audio export but no frames.
+    fn has_video_stream(&self) -> bool {
+        self.decoder.as_ref().is_some_and(|dec| dec.has_video)
+    }
+
+    /// Place the playhead of an audio-only source, which has no decoded frame
+    /// arriving to carry the position. Playback stops so the audio clock can't
+    /// immediately overwrite the new spot.
+    fn move_audio_only_playhead(&mut self, secs: f64) {
+        self.stop_play();
+        self.awaiting_release = None;
+        if let Some(dec) = &mut self.decoder {
+            dec.current_secs = secs.clamp(0.0, dec.duration_secs);
         }
     }
 
@@ -783,7 +822,22 @@ impl App {
             loop {
                 match dec.event_rx.try_recv() {
                     Ok(DecodeEvent::Opened { width, height, duration_secs, fps }) => {
-                        opened = Some((width, height, duration_secs, fps))
+                        opened = Some(OpenedSource {
+                            width,
+                            height,
+                            duration_secs,
+                            fps,
+                            has_video: true,
+                        })
+                    }
+                    Ok(DecodeEvent::OpenedAudioOnly { duration_secs }) => {
+                        opened = Some(OpenedSource {
+                            width: 0,
+                            height: 0,
+                            duration_secs,
+                            fps: AUDIO_ONLY_FPS,
+                            has_video: false,
+                        })
                     }
                     Ok(DecodeEvent::Frame { image, secs, gen }) => match awaiting {
                         // Waiting on a released seek: take only its frame, drop
@@ -805,18 +859,19 @@ impl App {
             self.awaiting_release = None;
         }
 
-        if let Some((width, height, duration_secs, fps)) = opened {
+        if let Some(source) = opened {
             if let Some(dec) = &mut self.decoder {
-                dec.width = width;
-                dec.height = height;
-                dec.duration_secs = duration_secs;
-                dec.fps = fps;
+                dec.width = source.width;
+                dec.height = source.height;
+                dec.duration_secs = source.duration_secs;
+                dec.fps = source.fps;
+                dec.has_video = source.has_video;
                 dec.ready = true;
             }
             self.in_secs = 0.0;
-            self.out_secs = duration_secs;
+            self.out_secs = source.duration_secs;
             self.view_start_secs = 0.0;
-            self.view_end_secs = duration_secs;
+            self.view_end_secs = source.duration_secs;
             self.clear_clip_history();
         }
         if let Some((image, secs)) = latest_frame {
@@ -2076,6 +2131,8 @@ impl App {
             // A decode failure clears the decoder but leaves `video_path` set.
             let is_decoder_ready = self.decoder.as_ref().is_some_and(|d| d.ready);
             let can_export = is_decoder_ready && !self.is_worker_busy();
+            // An audio-only source has audio to save but no video to save.
+            let can_export_video = can_export && self.has_video_stream();
 
             // Left group: audio format + Save audio only.
             ui.label("Audio:");
@@ -2111,7 +2168,7 @@ impl App {
             // Save full video, Save clip.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let save_clip = ui
-                    .add_enabled_ui(can_export, |ui| {
+                    .add_enabled_ui(can_export_video, |ui| {
                         icon_button(ui, save_icon(), "Save clip…")
                     })
                     .inner;
@@ -2119,7 +2176,7 @@ impl App {
                     *export_req = Some((Mode::Clip, vid));
                 }
                 let save_full = ui
-                    .add_enabled_ui(can_export, |ui| {
+                    .add_enabled_ui(can_export_video, |ui| {
                         icon_button(ui, save_icon(), "Save full video…")
                     })
                     .inner;
@@ -2274,9 +2331,22 @@ impl eframe::App for App {
             const RESYNC_SECS: f64 = 0.5;
             let clock = self.master_clock(now);
             if let Some(end) = self.play_until.filter(|&end| clock >= end) {
-                self.stop_play();
-                if let Some(dec) = &self.decoder {
-                    dec.seek_secs(end);
+                if self.has_video_stream() {
+                    self.stop_play();
+                    if let Some(dec) = &self.decoder {
+                        dec.seek_secs(end);
+                    }
+                } else {
+                    self.move_audio_only_playhead(end);
+                }
+            } else if !self.has_video_stream() {
+                // No frames arrive to carry the position, so the playhead
+                // follows the master clock directly.
+                let duration_secs = self.decoder.as_ref().map_or(0.0, |d| d.duration_secs);
+                if clock >= duration_secs {
+                    self.stop_play();
+                } else if let Some(dec) = &mut self.decoder {
+                    dec.current_secs = clock;
                 }
             } else {
                 let info = self
@@ -2396,8 +2466,14 @@ impl eframe::App for App {
                     }
                 }
                 None => {
+                    let is_audio_only =
+                        self.decoder.as_ref().is_some_and(|d| d.ready && !d.has_video);
                     ui.centered_and_justified(|ui| {
-                        ui.label("Open a file or download a video to begin.");
+                        if is_audio_only {
+                            ui.label("Audio only — no video stream to preview.");
+                        } else {
+                            ui.label("Open a file or download a video to begin.");
+                        }
                     });
                 }
             }
@@ -2406,22 +2482,32 @@ impl eframe::App for App {
         // Requests are non-blocking; decoded frames arrive via `poll_decoder`.
         // A released seek records its gen so the playhead pins there until that
         // exact frame lands; everything else clears any pending release.
-        if let Some(nav) = nav {
-            let new_awaiting = self.decoder.as_ref().and_then(|dec| match nav {
-                Nav::Back => {
-                    dec.step_backward();
-                    None
+        match nav {
+            // An audio-only source decodes no frames, so the playhead moves
+            // here rather than landing with one; stepping has nothing to land on.
+            Some(nav) if !self.has_video_stream() => {
+                if let Nav::Seek { secs, .. } = nav {
+                    self.move_audio_only_playhead(secs);
                 }
-                Nav::Forward => {
-                    dec.step_forward();
-                    None
-                }
-                Nav::Seek { secs, released } => {
-                    let gen = dec.seek_secs(secs);
-                    released.then_some((gen, secs))
-                }
-            });
-            self.awaiting_release = new_awaiting;
+            }
+            Some(nav) => {
+                let new_awaiting = self.decoder.as_ref().and_then(|dec| match nav {
+                    Nav::Back => {
+                        dec.step_backward();
+                        None
+                    }
+                    Nav::Forward => {
+                        dec.step_forward();
+                        None
+                    }
+                    Nav::Seek { secs, released } => {
+                        let gen = dec.seek_secs(secs);
+                        released.then_some((gen, secs))
+                    }
+                });
+                self.awaiting_release = new_awaiting;
+            }
+            None => {}
         }
 
         if let Some((mode, ext)) = export_req {

@@ -36,6 +36,28 @@ pub struct Decoder {
     current_pts: i64,
 }
 
+/// Playable length of a file that carries audio but no video, so an audio-only
+/// source still gets a timeline to trim against. Errors when the file has no
+/// audio stream either.
+pub fn audio_duration_secs(path: &str) -> Result<f64> {
+    ffmpeg::init()?;
+    let ictx = ffmpeg::format::input(&path)?;
+    let stream = ictx
+        .streams()
+        .best(Type::Audio)
+        .ok_or_else(|| anyhow!("no audio stream found"))?;
+
+    let time_base = f64::from(stream.time_base());
+    // WebM/Matroska leaves the per-stream duration unset; fall back to the
+    // container duration (in AV_TIME_BASE units) so the timeline isn't zero.
+    let secs = if stream.duration() > 0 {
+        stream.duration() as f64 * time_base
+    } else {
+        ictx.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE)
+    };
+    Ok(secs.max(0.0))
+}
+
 impl Decoder {
     pub fn open(path: &str) -> Result<Self> {
         ffmpeg::init()?;

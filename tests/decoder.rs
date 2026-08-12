@@ -2,7 +2,7 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use yt_dlp_clipper::decoder::Decoder;
+use yt_dlp_clipper::decoder::{audio_duration_secs, Decoder};
 
 const FRAME_SECS: f64 = 1.0 / common::FPS;
 const WIDTH: u32 = 320;
@@ -90,4 +90,48 @@ fn decodes_av1() {
     let mut dec = open(&av1());
     assert!(dec.step_forward().is_some(), "av1 first frame should decode");
     assert!(dec.seek_secs(1.5).is_some(), "av1 seek should decode");
+}
+
+#[test]
+fn open_rejects_a_source_with_no_video_stream() {
+    common::init();
+    for input in [common::opus_audio_only(), common::aac_audio_only()] {
+        assert!(
+            Decoder::open(input.to_str().unwrap()).is_err(),
+            "{} has no video stream, so the video decoder must not open it",
+            input.display()
+        );
+    }
+}
+
+#[test]
+fn audio_duration_matches_the_source_without_a_stream_duration() {
+    common::init();
+    let secs = audio_duration_secs(common::opus_audio_only().to_str().unwrap())
+        .expect("webm audio-only duration");
+    assert!(
+        (secs - common::DURATION_SECS).abs() < 0.2,
+        "duration {secs} not near {}",
+        common::DURATION_SECS
+    );
+}
+
+#[test]
+fn audio_duration_matches_the_source_carrying_a_stream_duration() {
+    common::init();
+    let secs = audio_duration_secs(common::aac_audio_only().to_str().unwrap())
+        .expect("m4a audio-only duration");
+    assert!(
+        (secs - common::DURATION_SECS).abs() < 0.2,
+        "duration {secs} not near {}",
+        common::DURATION_SECS
+    );
+}
+
+/// The decoder thread only reports a source as audio-only when this succeeds,
+/// so a video-only file must fall through to the real decode error instead.
+#[test]
+fn audio_duration_errors_without_an_audio_stream() {
+    common::init();
+    assert!(audio_duration_secs(common::vp9().to_str().unwrap()).is_err());
 }

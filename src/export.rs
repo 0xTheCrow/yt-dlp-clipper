@@ -425,7 +425,12 @@ fn export_audio_reencode(
         .flags()
         .contains(ffmpeg::format::Flags::GLOBAL_HEADER);
     let mut reenc = AudioReenc::new(
-        &mut octx, decoder, codec_id, global_header, in_tb, spec.start_secs, spec.end_secs,
+        &mut octx,
+        decoder,
+        codec_id,
+        global_header,
+        in_tb,
+        Some((spec.start_secs, spec.end_secs)),
     )?;
 
     write_header(&mut octx, spec.output.as_ref())?;
@@ -526,7 +531,7 @@ fn open_audio_encoder(
 fn audio_filter(
     decoder: &ffmpeg::codec::decoder::Audio,
     encoder: &ffmpeg::codec::encoder::Audio,
-    trim: (i64, i64),
+    trim: Option<(i64, i64)>,
 ) -> Result<ffmpeg::filter::Graph> {
     let mut graph = ffmpeg::filter::Graph::new();
     let layout = if decoder.channel_layout().is_empty() {
@@ -551,8 +556,12 @@ fn audio_filter(
         out.set_channel_layout(encoder.channel_layout());
         out.set_sample_rate(encoder.rate());
     }
-    let (start_sample, end_sample) = trim;
-    let chain = format!("atrim=start_sample={start_sample}:end_sample={end_sample}");
+    let chain = match trim {
+        Some((start_sample, end_sample)) => {
+            format!("atrim=start_sample={start_sample}:end_sample={end_sample}")
+        }
+        None => "anull".to_string(),
+    };
     graph.output("in", 0)?.input("out", 0)?.parse(&chain)?;
     graph.validate()?;
 
@@ -743,9 +752,9 @@ struct AudioReenc {
     in_tb: ffmpeg::Rational,
     /// Decoder sample rate, for converting the window seconds to samples.
     rate: f64,
-    /// Window bounds as absolute sample indices in the source.
-    start_sample: i64,
-    end_sample: i64,
+    /// Window bounds as absolute sample indices in the source. `None` re-encodes
+    /// the stream end to end, which is what saving the full file wants.
+    window_samples: Option<(i64, i64)>,
     in_samples: i64,
     out_samples: i64,
 }
@@ -757,8 +766,7 @@ impl AudioReenc {
         codec_id: ffmpeg::codec::Id,
         global_header: bool,
         in_tb: ffmpeg::Rational,
-        start_secs: f64,
-        end_secs: f64,
+        window_secs: Option<(f64, f64)>,
     ) -> Result<Self> {
         let rate = decoder.rate() as f64;
         let (out_index, encoder) = open_audio_encoder(octx, &decoder, codec_id, global_header)?;
@@ -770,8 +778,9 @@ impl AudioReenc {
             out_tb: ffmpeg::Rational(1, 1),
             in_tb,
             rate,
-            start_sample: (start_secs * rate).round() as i64,
-            end_sample: (end_secs * rate).round() as i64,
+            window_samples: window_secs.map(|(start_secs, end_secs)| {
+                ((start_secs * rate).round() as i64, (end_secs * rate).round() as i64)
+            }),
             in_samples: 0,
             out_samples: 0,
         })
@@ -788,7 +797,9 @@ impl AudioReenc {
                 // shift the window bounds to be relative to it for `atrim`.
                 let base =
                     (frame.pts().unwrap_or(0) as f64 * f64::from(self.in_tb) * self.rate).round() as i64;
-                let trim = ((self.start_sample - base).max(0), self.end_sample - base);
+                let trim = self
+                    .window_samples
+                    .map(|(start, end)| ((start - base).max(0), end - base));
                 self.filter = Some(audio_filter(&self.decoder, &self.encoder, trim)?);
             }
             let filter = self.filter.as_mut().unwrap();
@@ -922,14 +933,16 @@ fn transcode(spec: &ExportSpec, container: Container, clip: bool, cancel: &Atomi
             let decoder = ffmpeg::codec::context::Context::from_parameters(params)?
                 .decoder()
                 .audio()?;
+            // Saving the full file re-encodes the audio only because the
+            // container can't hold the source codec; the clip range is not its
+            // window, so the whole stream goes through untrimmed.
             a_reenc = Some(AudioReenc::new(
                 &mut octx,
                 decoder,
                 audio_encode_codec(container),
                 global_header,
                 in_tb,
-                spec.start_secs,
-                spec.end_secs,
+                clip.then_some((spec.start_secs, spec.end_secs)),
             )?);
         }
     }

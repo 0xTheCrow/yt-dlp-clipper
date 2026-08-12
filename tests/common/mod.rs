@@ -53,6 +53,28 @@ pub fn h264_with_audio() -> PathBuf {
     .clone()
 }
 
+/// Opus audio in webm with no video stream — mirrors a `bestaudio` YouTube
+/// download. WebM leaves the per-stream duration unset, so this also covers the
+/// container-duration fallback.
+pub fn opus_audio_only() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        generate(
+            "fixture_opus_audio_only.webm",
+            &["-map", "1:a", "-c:a", "libopus"],
+        )
+    })
+    .clone()
+}
+
+/// AAC audio with no video stream in m4a, which does carry a per-stream
+/// duration — the other branch of the audio-only duration lookup.
+pub fn aac_audio_only() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| generate("fixture_aac_audio_only.m4a", &["-map", "1:a", "-c:a", "aac"]))
+        .clone()
+}
+
 /// VP9 video (no audio) in webm — mirrors a YouTube-style merge codec.
 pub fn vp9() -> PathBuf {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
