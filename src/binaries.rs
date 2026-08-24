@@ -85,7 +85,6 @@ fn extract_to_managed(bytes: &[u8], name: &str) -> Option<PathBuf> {
     Some(dest)
 }
 
-// Fallbacks for when embedded bytes are available (bundle-tools) or not.
 #[cfg(feature = "bundle-tools")]
 fn embedded_ytdlp() -> Option<PathBuf> {
     extract_to_managed(BUNDLED_YTDLP_BYTES, YTDLP_EXE)
@@ -129,7 +128,6 @@ pub(crate) fn resolve_ytdlp() -> Option<PathBuf> {
             return Some(m.clone());
         }
     }
-    // Try a file source we can seed from (bundle beside exe, or PATH).
     if let Some(source) = bundled_binary(YTDLP_EXE).or_else(|| find_in_path(YTDLP_EXE)) {
         return match &managed {
             Some(m) if std::fs::copy(&source, m).is_ok() => {
@@ -139,7 +137,6 @@ pub(crate) fn resolve_ytdlp() -> Option<PathBuf> {
             _ => Some(source),
         };
     }
-    // No file found; extract from bytes embedded at compile time.
     embedded_ytdlp()
 }
 

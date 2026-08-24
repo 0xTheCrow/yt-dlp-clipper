@@ -46,7 +46,6 @@ const APP_DISPLAY_NAME: &str = "Cooper Clipper";
 /// those shorter than the source are shown, so the menu never upscales.
 const EXPORT_HEIGHT_LADDER: [u32; 8] = [2160, 1440, 1080, 720, 480, 360, 240, 144];
 
-/// Seconds skipped by the skip-back / skip-forward keys.
 const SKIP_SECS: f64 = 5.0;
 /// Cap on retained clip-range edits per undo/redo stack. Every zoom-window
 /// placement is an undoable step, so browsing draws on it as well as editing.
@@ -56,11 +55,9 @@ const MIN_RANGE_SECS: f64 = 0.05;
 /// Frame rate reported for an audio-only source, which has no frames of its
 /// own. It only sets the granularity of the seconds-to-timeline arithmetic.
 const AUDIO_ONLY_FPS: f64 = 30.0;
-/// Half-width of the pointer zone that grabs a drag handle.
 const HANDLE_GRAB_RADIUS: f32 = 10.0;
 /// Visible span multiplier per unit of scroll over the timeline.
 const SCROLL_ZOOM_RATE: f32 = 0.0015;
-/// Idle gap that closes a scroll-zoom gesture.
 const SCROLL_GESTURE_IDLE_SECS: f64 = 0.4;
 /// Held nav key: how long before auto-repeat begins, then the interval between
 /// repeats (seconds). Keeps a held key from firing too fast.
@@ -153,8 +150,6 @@ fn main() -> eframe::Result<()> {
         STORAGE_APP_ID,
         options,
         Box::new(move |cc| {
-            // Register the SVG (and other) image loaders so `egui::Image` /
-            // `include_image!` can rasterize the button icons.
             egui_extras::install_image_loaders(&cc.egui_ctx);
             let mut app = App::default();
             if let Some(storage) = cc.storage {
@@ -199,7 +194,6 @@ enum Nav {
 }
 
 const CONTROL_PAD: f32 = 6.0;
-/// Width of the volume slider track.
 const VOLUME_SLIDER_WIDTH: f32 = 90.0;
 /// Gap between the output filename's extension and the "Save to:" folder control.
 const SAVE_TARGET_GAP: f32 = 24.0;
@@ -442,7 +436,6 @@ impl App {
                     self.export_path = None;
                     return;
                 }
-                // Worker still running: keep the receiver for the next frame.
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     self.rx = Some(rx);
                     return;
@@ -1273,8 +1266,6 @@ impl App {
                 ui.add_space(SECTION_GAP);
                 ui.label("Keyboard shortcuts");
                 ui.add_space(4.0);
-                // Two columns: each grid row holds two actions, label left and
-                // its key button right within each half.
                 let mut bind_row = |ui: &mut egui::Ui, bind: Bind, label: &str| {
                     ui.label(label);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1527,7 +1518,6 @@ impl App {
                 .map(ytdlp::available_heights)
                 .unwrap_or_default();
 
-            // Estimated size of the current selection, shown before downloading.
             let est_size = self.info.as_ref().and_then(|info| {
                 ytdlp::estimated_size(info, self.selected_height, self.want_video, self.want_audio)
             });
@@ -1896,7 +1886,6 @@ impl App {
             egui::Rounding::ZERO,
             visuals.selection.bg_fill,
         );
-        // gray out before the in point and after the out point
         painter.rect_filled(
             egui::Rect::from_min_max(rect.left_top(), egui::pos2(lo, rect.bottom())),
             egui::Rounding::ZERO,
@@ -1975,7 +1964,6 @@ impl App {
                 ))
                 .layout(layout)
         };
-        // Center within the gap between the left and right groups.
         let center_x = (row.left() + left_w + row.right() - right_w) / 2.0 - center_w / 2.0;
 
         ui.allocate_new_ui(
@@ -2128,10 +2116,8 @@ impl App {
             // A decode failure clears the decoder but leaves `video_path` set.
             let is_decoder_ready = self.decoder.as_ref().is_some_and(|d| d.ready);
             let can_export = is_decoder_ready && !self.is_worker_busy();
-            // An audio-only source has audio to save but no video to save.
             let can_export_video = can_export && self.has_video_stream();
 
-            // Left group: audio format + Save audio only.
             ui.label("Audio:");
             egui::ComboBox::from_id_salt("audio_format")
                 .selected_text(audio_format_label(self.audio_format))
@@ -2161,8 +2147,7 @@ impl App {
             }
             ui.separator();
 
-            // Right group, added right-to-left so it reads: Video, Resolution,
-            // Save full video, Save clip.
+            // Added right-to-left so it reads: Video, Resolution, Save full video, Save clip.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let save_clip = ui
                     .add_enabled_ui(can_export_video, |ui| {
@@ -2347,7 +2332,6 @@ impl eframe::App for App {
                             }
                         }
                     }
-                    // Reached the end (or no decoder): stop.
                     _ => self.stop_play(),
                 }
             }

@@ -115,7 +115,6 @@ const SWITCH_WIDTH_RATIO: f32 = 1.6;
 /// Knob radius as a fraction of the track's half-height; big enough to hold the
 /// "on"/"off" label, slightly inset from the track edge.
 const SWITCH_KNOB_RATIO: f32 = 0.8;
-/// "on"/"off" label font size as a fraction of the switch height.
 const SWITCH_LABEL_RATIO: f32 = 0.42;
 
 /// A sliding on/off switch: a pill track with a knob that animates between
@@ -204,8 +203,6 @@ pub(crate) fn attach_text_menu(
     response: &mut egui::Response,
     prev_selection: Option<egui::text::CCursorRange>,
 ) {
-    // A right-press collapses the selection, so restore it (and focus the field)
-    // for Cut/Copy/Paste to operate on.
     if response.contains_pointer() && ui.input(|i| i.pointer.secondary_pressed()) {
         if let (Some(range), Some(mut state)) =
             (prev_selection, egui::text_edit::TextEditState::load(ui.ctx(), id))

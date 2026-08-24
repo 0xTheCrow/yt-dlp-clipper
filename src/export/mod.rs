@@ -131,7 +131,6 @@ fn check_window(spec: &ExportSpec) -> Result<()> {
     Ok(())
 }
 
-/// Error out when the export has been cancelled, so the encode loop unwinds.
 fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     if cancel.load(Ordering::Relaxed) {
         bail!("export cancelled");
@@ -192,8 +191,6 @@ fn export_clip(spec: &ExportSpec, cancel: &AtomicBool) -> Result<()> {
     transcode(&mut ictx, spec, plan, true, cancel)
 }
 
-/// Save the windowed audio stream on its own, re-encoded to the chosen format or
-/// stream-copied losslessly.
 fn export_audio_only(spec: &ExportSpec, format: AudioFormat, cancel: &AtomicBool) -> Result<()> {
     let codec_id = match format {
         AudioFormat::Original => return export_audio_copy(spec, cancel),

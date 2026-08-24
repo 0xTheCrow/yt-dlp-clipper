@@ -179,7 +179,6 @@ mod tests {
     const FIXTURE_DURATION_SECS: f64 = 3.0;
     const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 
-    /// Generate `name` in the temp dir with the ffmpeg CLI if it isn't there.
     fn fixture(name: &str, encode_args: &[&str]) -> String {
         let path = std::env::temp_dir().join(name);
         if !path.exists() {

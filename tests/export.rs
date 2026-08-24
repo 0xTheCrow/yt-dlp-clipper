@@ -202,7 +202,6 @@ fn compat_transcodes_av1_into_h264_in_mp4() {
 
 #[test]
 fn noncompat_copies_av1_into_mp4() {
-    // With compatibility off, AV1 is copied into MP4 as-is.
     let out = run_from_compat(av1_in_mp4(), Mode::Full, "export_av1_raw.mp4", 0.0, common::DURATION_SECS, false);
     assert_eq!(codec_of(&out, "video"), "av1", "av1 should be copied unchanged");
 }
@@ -217,7 +216,6 @@ fn compat_reencodes_10bit_h264_to_8bit() {
 
 #[test]
 fn noncompat_copies_10bit_h264() {
-    // With compatibility off, the 10-bit stream is copied through untouched.
     let out = run_from_compat(h264_10bit(), Mode::Full, "export_10bit_raw.mp4", 0.0, common::DURATION_SECS, false);
     assert_eq!(pix_fmt_of(&out), "yuv420p10le", "10-bit should be preserved");
 }
@@ -231,7 +229,6 @@ fn compat_reencodes_ac3_audio_to_aac() {
 
 #[test]
 fn noncompat_copies_ac3_into_mp4() {
-    // With compatibility off, AC-3 is copied into MP4 as-is.
     let out = run_from_compat(h264_with_ac3(), Mode::Full, "export_ac3_raw.mp4", 0.0, common::DURATION_SECS, false);
     assert_eq!(codec_of(&out, "audio"), "ac3", "ac3 should be copied unchanged");
 }

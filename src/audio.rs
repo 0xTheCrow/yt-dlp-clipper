@@ -170,8 +170,6 @@ fn decode_audio(
     // preview starts on the same sample the export does, keeping audio/video and
     // the clock honest. Set on the first decoded frame, whose PTS fixes the lead.
     let mut skip_frames: Option<i64> = None;
-    // Compute the leading `skip` (output frames between the seek landing and the
-    // in-point) from the first decoded frame's PTS.
     let lead_skip = |frame: &ffmpeg::frame::Audio| {
         let frame_secs = frame.pts().unwrap_or(0) as f64 * time_base;
         ((start_secs - frame_secs).max(0.0) * out_rate as f64).round() as i64

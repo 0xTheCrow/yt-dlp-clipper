@@ -10,7 +10,6 @@ use ffmpeg::util::frame::video::Video;
 use super::copy::write_packet;
 use super::plan::Container;
 
-/// libx264 speed/quality preset for the re-encoded clip.
 const X264_PRESET: &str = "medium";
 /// Constant Rate Factor for libx264 (lower is higher quality; 18-28 is typical).
 const X264_CRF: &str = "23";

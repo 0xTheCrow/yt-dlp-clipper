@@ -79,7 +79,6 @@ impl Decoder {
             ((container_secs / time_base) as i64).max(0)
         };
 
-        // frames-per-second, from the stream's average frame rate
         let fps = f64::from(stream.avg_frame_rate());
         let fps = if fps > 0.0 { fps } else { DEFAULT_FPS };
         // one frame in time-base units, at least 1 so stepping always moves
@@ -139,8 +138,6 @@ impl Decoder {
         }
     }
 
-    // --- public stepping API -------------------------------------------------
-
     /// Decode the next frame in presentation order. None at end of stream.
     pub fn step_forward(&mut self) -> Option<egui::ColorImage> {
         let mut frame = Video::empty();
@@ -182,10 +179,6 @@ impl Decoder {
         self.seek_exact(target.clamp(0, self.duration_ts.max(0)))
     }
 
-    // --- internals -----------------------------------------------------------
-
-    /// Seek to the keyframe at/before `target_pts`, then decode forward until
-    /// the first frame whose pts >= target_pts.
     fn seek_exact(&mut self, target_pts: i64) -> Option<egui::ColorImage> {
         // The container seek works in AV_TIME_BASE units; `..seek_ts` keeps the
         // landing keyframe at or before the target.
@@ -207,7 +200,6 @@ impl Decoder {
         None
     }
 
-    /// Pull packets and feed the decoder until one frame is produced.
     /// Returns false at end of stream.
     fn receive_next(&mut self, frame: &mut Video) -> bool {
         loop {
