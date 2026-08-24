@@ -1,7 +1,7 @@
 //! Thin wrapper around the `yt-dlp` binary (spawned as a subprocess).
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -30,6 +30,68 @@ pub fn set_ffmpeg(path: PathBuf) {
 /// runs with yt-dlp on PATH).
 fn binary() -> PathBuf {
     YTDLP_BIN.get().cloned().unwrap_or_else(|| PathBuf::from("yt-dlp"))
+}
+
+/// A browser yt-dlp can pull cookies from (`--cookies-from-browser`), letting a
+/// fetch/download authenticate as the signed-in user for age-gated or
+/// members-only videos that otherwise fail with "Sign in to confirm your age".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Browser {
+    Brave,
+    Chrome,
+    Chromium,
+    Edge,
+    Firefox,
+    Opera,
+    Safari,
+    Vivaldi,
+    Whale,
+}
+
+impl Browser {
+    /// All supported browsers, in display order, with their settings labels.
+    pub const ALL: [(Browser, &'static str); 9] = [
+        (Browser::Chrome, "Chrome"),
+        (Browser::Firefox, "Firefox"),
+        (Browser::Edge, "Edge"),
+        (Browser::Brave, "Brave"),
+        (Browser::Chromium, "Chromium"),
+        (Browser::Opera, "Opera"),
+        (Browser::Vivaldi, "Vivaldi"),
+        (Browser::Whale, "Whale"),
+        (Browser::Safari, "Safari"),
+    ];
+
+    /// The name yt-dlp's `--cookies-from-browser` expects, also used as the
+    /// stable persistence id.
+    pub fn id(self) -> &'static str {
+        match self {
+            Browser::Brave => "brave",
+            Browser::Chrome => "chrome",
+            Browser::Chromium => "chromium",
+            Browser::Edge => "edge",
+            Browser::Firefox => "firefox",
+            Browser::Opera => "opera",
+            Browser::Safari => "safari",
+            Browser::Vivaldi => "vivaldi",
+            Browser::Whale => "whale",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Browser> {
+        Browser::ALL.iter().map(|(b, _)| *b).find(|b| b.id() == id)
+    }
+}
+
+/// Where yt-dlp reads cookies from for a fetch/download: live from an
+/// installed browser's profile, or a Netscape-format `cookies.txt` (e.g.
+/// exported via a browser extension). yt-dlp accepts only one cookie source
+/// per invocation, so it's the browser **or** the file, never both — hence an
+/// enum rather than two independent settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CookieSource {
+    Browser(Browser),
+    File(PathBuf),
 }
 
 /// One downloadable format as reported by `yt-dlp -J`.
@@ -183,6 +245,16 @@ pub fn suggests_update(text: &str) -> bool {
     MARKERS.iter().any(|m| lower.contains(m))
 }
 
+/// True when yt-dlp's failure looks like it needs an authenticated session —
+/// an age gate or a bot check, both of which yt-dlp tells users to get past
+/// with `--cookies-from-browser`/`--cookies`. The GUI's error panel offers
+/// that as a one-click fix when this matches.
+pub fn suggests_cookies(text: &str) -> bool {
+    const MARKERS: [&str; 3] = ["sign in to confirm", "--cookies-from-browser", "use --cookies"];
+    let lower = text.to_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m))
+}
+
 /// The installed yt-dlp's version string (`yt-dlp --version`), trimmed.
 pub fn version() -> Result<String> {
     let output = Command::new(binary())
@@ -209,12 +281,39 @@ pub fn update() -> Result<String> {
     Ok(report)
 }
 
-/// Fetch metadata (`yt-dlp -J <url>`) without downloading anything.
-pub fn fetch_info(url: &str) -> Result<VideoInfo> {
+/// Appends `cookies`' flag onto `args`: `--cookies-from-browser <name>` for a
+/// `Browser` source, `--cookies <path>` for a `File` one, nothing for `None`.
+/// `file_path` holds the owned string a `File` source's path arg borrows from,
+/// so it must outlive `args`.
+fn push_cookie_args<'a>(
+    args: &mut Vec<&'a str>,
+    cookies: Option<&CookieSource>,
+    file_path: &'a mut String,
+) {
+    match cookies {
+        Some(CookieSource::Browser(browser)) => {
+            args.extend(["--cookies-from-browser", browser.id()]);
+        }
+        Some(CookieSource::File(path)) => {
+            *file_path = path.to_string_lossy().into_owned();
+            args.extend(["--cookies", file_path.as_str()]);
+        }
+        None => {}
+    }
+}
+
+/// Fetch metadata (`yt-dlp -J <url>`) without downloading anything. `cookies`
+/// authenticates the request (browser session or a `cookies.txt`), needed for
+/// age-gated or members-only videos.
+pub fn fetch_info(url: &str, cookies: Option<&CookieSource>) -> Result<VideoInfo> {
+    let mut args = vec!["-J", "--no-playlist"];
+    let mut cookie_file_path = String::new();
+    push_cookie_args(&mut args, cookies, &mut cookie_file_path);
+    // `--` ends option parsing so a URL starting with `-` can't be taken as a
+    // yt-dlp flag (e.g. `--exec`, `--config-location`).
+    args.extend(["--", url]);
     let output = Command::new(binary())
-        // `--` ends option parsing so a URL starting with `-` can't be taken as
-        // a yt-dlp flag (e.g. `--exec`, `--config-location`).
-        .args(["-J", "--no-playlist", "--", url])
+        .args(&args)
         .output()
         .context("failed to run yt-dlp — is it installed and on PATH?")?;
 
@@ -233,11 +332,14 @@ pub fn fetch_info(url: &str) -> Result<VideoInfo> {
 
 /// Download into `dir`, returning the produced file path. A `selector` of
 /// `None` lets yt-dlp use its default (best video + audio merged); otherwise
-/// it is passed verbatim to `-f`. `on_progress` receives `(downloaded, total)`
-/// byte counts for the file currently being fetched.
+/// it is passed verbatim to `-f`. `cookies` authenticates the request (browser
+/// session or a `cookies.txt`), needed for age-gated or members-only videos.
+/// `on_progress` receives `(downloaded, total)` byte counts for the file
+/// currently being fetched.
 pub fn download(
     url: &str,
     selector: Option<&str>,
+    cookies: Option<&CookieSource>,
     dir: &Path,
     cancel: &AtomicBool,
     mut on_progress: impl FnMut(u64, u64),
@@ -258,6 +360,8 @@ pub fn download(
     if let Some(sel) = selector {
         args.extend(["-f", sel]);
     }
+    let mut cookie_file_path = String::new();
+    push_cookie_args(&mut args, cookies, &mut cookie_file_path);
     // Pin the ffmpeg used for the video+audio merge to our resolved binary, so
     // yt-dlp can't pick up a planted `ffmpeg` from PATH/CWD.
     let ffmpeg_loc = FFMPEG_BIN.get().map(|p| p.to_string_lossy().into_owned());
@@ -324,7 +428,7 @@ pub fn download(
 
 #[cfg(test)]
 mod tests {
-    use super::suggests_update;
+    use super::{suggests_cookies, suggests_update};
 
     #[test]
     fn flags_update_hints() {
@@ -340,5 +444,22 @@ mod tests {
     fn ignores_unrelated_errors() {
         assert!(!suggests_update("ERROR: unable to open file: permission denied"));
         assert!(!suggests_update("ERROR: [generic] None: Requested format is not available"));
+    }
+
+    #[test]
+    fn flags_cookie_hints() {
+        assert!(suggests_cookies(
+            "ERROR: [youtube] rixzL5WlS-Y: Sign in to confirm your age. Use \
+             --cookies-from-browser or --cookies for the authentication."
+        ));
+        assert!(suggests_cookies(
+            "ERROR: [youtube] abc123: Sign in to confirm you're not a bot."
+        ));
+    }
+
+    #[test]
+    fn ignores_non_cookie_errors() {
+        assert!(!suggests_cookies("ERROR: unable to open file: permission denied"));
+        assert!(!suggests_cookies("ERROR: [generic] None: Requested format is not available"));
     }
 }

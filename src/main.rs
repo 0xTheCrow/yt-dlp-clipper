@@ -3,6 +3,7 @@ mod cache;
 mod decoder_thread;
 mod format;
 mod keybinds;
+mod settings;
 mod theme;
 mod widgets;
 
@@ -16,6 +17,7 @@ use yt_dlp_clipper::audio::AudioPlayer;
 use yt_dlp_clipper::export::{self, ExportSpec, Mode};
 use yt_dlp_clipper::updater;
 use yt_dlp_clipper::ytdlp;
+use yt_dlp_clipper::ytdlp::{Browser, CookieSource};
 
 use binaries::{
     clear_dir, dir_size, managed_cache_dir, reset_bundled_tools, resolve_ffmpeg, resolve_ytdlp,
@@ -23,8 +25,9 @@ use binaries::{
 use cache::{cache_thumbnails, is_video_file, CacheEntry, CacheThumb};
 use decoder_thread::{DecodeEvent, DecoderHandle};
 use format::{audio_format_label, fmt_duration, fmt_size, fmt_time, sanitize_filename};
-use keybinds::{shortcut_down, shortcut_pressed, Bind, Keybinds, Shortcut};
-use theme::{apply_theme, theme_pref_from_name, theme_pref_label, theme_pref_name};
+use keybinds::{shortcut_down, shortcut_pressed, Bind, Shortcut};
+use settings::Settings;
+use theme::{apply_theme, theme_pref_label};
 use widgets::{
     arrow_image, attach_text_menu, bracket_left_icon, bracket_right_icon, bracketed_button,
     button_height, download_icon, icon_button, play_selection_icon, reveal_in_file_manager,
@@ -38,16 +41,6 @@ pub(crate) const STORAGE_APP_ID: &str = "yt-dlp-clipper";
 /// User-facing name, matching the window title, the desktop entry, and the
 /// `.app` bundle.
 const APP_DISPLAY_NAME: &str = "Cooper Clipper";
-
-const SCALE_STORAGE_KEY: &str = "ui_scale";
-const DOWNLOAD_DIR_KEY: &str = "download_dir";
-const DELETE_ON_EXIT_KEY: &str = "delete_cache_on_exit";
-const VOLUME_KEY: &str = "volume";
-const KEYBINDS_KEY: &str = "keybinds";
-const OUTPUT_DIR_KEY: &str = "output_dir";
-const OPEN_DIR_ON_SAVE_KEY: &str = "open_dir_on_save";
-const THEME_KEY: &str = "theme";
-const COMPATIBILITY_MODE_KEY: &str = "compatibility_mode";
 
 /// Standard heights offered when downscaling a saved video, tallest first. Only
 /// those shorter than the source are shown, so the menu never upscales.
@@ -165,52 +158,11 @@ fn main() -> eframe::Result<()> {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             let mut app = App::default();
             if let Some(storage) = cc.storage {
-                if let Some(scale) = eframe::get_value::<f32>(storage, SCALE_STORAGE_KEY) {
-                    app.ui_scale = scale;
-                    app.pending_scale = scale;
-                    cc.egui_ctx.set_zoom_factor(scale);
-                }
-                app.download_dir = eframe::get_value::<Option<PathBuf>>(storage, DOWNLOAD_DIR_KEY)
-                    .flatten();
-                app.output_dir = eframe::get_value::<Option<PathBuf>>(storage, OUTPUT_DIR_KEY)
-                    .flatten();
-                app.delete_cache_on_exit =
-                    eframe::get_value(storage, DELETE_ON_EXIT_KEY).unwrap_or(false);
-                app.open_dir_on_save =
-                    eframe::get_value(storage, OPEN_DIR_ON_SAVE_KEY).unwrap_or(false);
-                app.compatibility_mode =
-                    eframe::get_value(storage, COMPATIBILITY_MODE_KEY).unwrap_or(true);
-                app.volume = eframe::get_value(storage, VOLUME_KEY).unwrap_or(0.5);
-                if let Some(name) = eframe::get_value::<String>(storage, THEME_KEY) {
-                    app.theme = theme_pref_from_name(&name);
-                }
-                // Each shortcut persists as (action id, key name, ctrl, shift).
-                // Keyed by a stable id so reordering/adding actions can't misread
-                // a save; unknown ids and absent actions just keep their defaults.
-                // Falls back to the older ctrl-less (id, name, shift) format.
-                if let Some(saved) =
-                    eframe::get_value::<Vec<(String, String, bool, bool)>>(storage, KEYBINDS_KEY)
-                {
-                    for (id, name, ctrl, shift) in saved {
-                        if let (Some(bind), Some(key)) =
-                            (Bind::from_id(&id), egui::Key::from_name(&name))
-                        {
-                            app.keybinds.put(bind, Shortcut { key, ctrl, shift });
-                        }
-                    }
-                } else if let Some(saved) =
-                    eframe::get_value::<Vec<(String, String, bool)>>(storage, KEYBINDS_KEY)
-                {
-                    for (id, name, shift) in saved {
-                        if let (Some(bind), Some(key)) =
-                            (Bind::from_id(&id), egui::Key::from_name(&name))
-                        {
-                            app.keybinds.put(bind, Shortcut { key, ctrl: false, shift });
-                        }
-                    }
-                }
+                app.settings = Settings::load(storage);
+                app.pending_scale = app.settings.ui_scale;
+                cc.egui_ctx.set_zoom_factor(app.settings.ui_scale);
             }
-            apply_theme(&cc.egui_ctx, app.theme);
+            apply_theme(&cc.egui_ctx, app.settings.theme);
             if let Some(path) = cli_path {
                 app.load_video(PathBuf::from(path));
             }
@@ -299,14 +251,11 @@ struct App {
     undo_stack: Vec<ClipRange>,
     redo_stack: Vec<ClipRange>,
 
-    ui_scale: f32,
-    /// Scale being edited in Settings; applied to `ui_scale` only on Apply.
+    /// Everything that persists between sessions via eframe storage.
+    settings: Settings,
+    /// Scale being edited in Settings; applied to `settings.ui_scale` only on Apply.
     pending_scale: f32,
-    /// Light/Dark/System appearance; `System` follows the desktop theme.
-    theme: egui::ThemePreference,
     show_settings: bool,
-    /// Configurable shortcuts for clip + playback actions.
-    keybinds: Keybinds,
     /// In Settings, the action whose next keypress is being captured, if any.
     rebinding: Option<Bind>,
     /// Per nav action (skip back/fwd, step back/fwd) the input time at which a
@@ -328,16 +277,6 @@ struct App {
     /// is created per download.
     download_cancel: Arc<AtomicBool>,
 
-    /// Where downloads are saved; `None` uses the managed cache directory.
-    download_dir: Option<PathBuf>,
-    /// Default folder the export save dialog opens in; `None` uses the system
-    /// default. The dialog is always shown either way.
-    output_dir: Option<PathBuf>,
-    /// Clear the managed cache directory when the app closes.
-    delete_cache_on_exit: bool,
-    /// Reveal the saved file's folder in the system file manager after a save.
-    open_dir_on_save: bool,
-
     show_cache: bool,
     cache_entries: Vec<CacheEntry>,
     cache_rx: Option<Receiver<CacheThumb>>,
@@ -346,10 +285,6 @@ struct App {
     audio_format: export::AudioFormat,
     /// Target container for "Save clip" / "Save full video".
     video_format: export::VideoFormat,
-    /// When set, a saved MP4/MOV is restricted to broadly-playable codecs
-    /// (H.264 8-bit + AAC/MP3), re-encoding anything else; when clear, the
-    /// source codec/quality is kept (HEVC/AV1, 10-bit, HDR). On by default.
-    compatibility_mode: bool,
     /// Downscale height for saved video; `None` keeps the source resolution.
     export_height: Option<u32>,
 
@@ -357,8 +292,6 @@ struct App {
     /// When set, playback stops once the master clock reaches this position;
     /// `None` plays to the end.
     play_until: Option<f64>,
-    /// Output volume in `0.0..=1.0`, applied to audio playback.
-    volume: f32,
     /// Audio output during playback; `None` means play video without sound.
     audio: Option<AudioPlayer>,
     /// Master-clock origin for video-only playback (no audio device/track):
@@ -373,6 +306,7 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
+        let settings = Settings::default();
         Self {
             url: String::new(),
             info: None,
@@ -402,11 +336,9 @@ impl Default for App {
             timeline_drag: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            ui_scale: 1.0,
-            pending_scale: 1.0,
-            theme: egui::ThemePreference::System,
+            pending_scale: settings.ui_scale,
+            settings,
             show_settings: false,
-            keybinds: Keybinds::default(),
             rebinding: None,
             nav_repeat_at: [0.0; 4],
             progress: None,
@@ -414,20 +346,14 @@ impl Default for App {
             export_path: None,
             export_cancel: Arc::new(AtomicBool::new(false)),
             download_cancel: Arc::new(AtomicBool::new(false)),
-            download_dir: None,
-            output_dir: None,
-            delete_cache_on_exit: false,
-            open_dir_on_save: false,
             show_cache: false,
             cache_entries: Vec::new(),
             cache_rx: None,
             audio_format: export::AudioFormat::Mp3,
             video_format: export::VideoFormat::Mp4,
-            compatibility_mode: true,
             export_height: None,
             playing: false,
             play_until: None,
-            volume: 0.5,
             audio: None,
             play_start_wall: 0.0,
             play_start_pos: 0.0,
@@ -491,7 +417,7 @@ impl App {
                     self.progress = None;
                     self.exporting = false;
                     self.export_path = None;
-                    if self.open_dir_on_save {
+                    if self.settings.open_dir_on_save {
                         reveal_in_file_manager(&path);
                     }
                     self.saved_path = Some(path);
@@ -524,11 +450,6 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
             }
         }
-    }
-
-    /// The directory downloads are written to (custom override or cache).
-    fn effective_download_dir(&self) -> PathBuf {
-        self.download_dir.clone().unwrap_or_else(managed_cache_dir)
     }
 
     fn clip_range(&self) -> ClipRange {
@@ -756,7 +677,7 @@ impl App {
         self.awaiting_release = None;
         self.play_start_wall = now;
         self.play_start_pos = pos;
-        let volume = self.volume;
+        let volume = self.settings.volume;
         self.audio = self
             .video_path
             .as_ref()
@@ -796,7 +717,7 @@ impl App {
         self.play_until = until;
         self.play_start_wall = now;
         self.play_start_pos = pos;
-        let volume = self.volume;
+        let volume = self.settings.volume;
         self.audio = self
             .video_path
             .as_ref()
@@ -1031,7 +952,7 @@ impl App {
         let base = self.video_title.as_deref().unwrap_or("video");
         let stem = sanitize_filename(base);
         let mut dialog = rfd::FileDialog::new().set_file_name(format!("{stem}.{ext}"));
-        if let Some(dir) = &self.output_dir {
+        if let Some(dir) = &self.settings.output_dir {
             dialog = dialog.set_directory(dir);
         }
         let Some(out) = dialog.save_file() else {
@@ -1051,7 +972,7 @@ impl App {
             end_secs: self.out_secs,
             mode,
             scale_height,
-            compatibility_mode: self.compatibility_mode,
+            compatibility_mode: self.settings.compatibility_mode,
         };
         self.status = "exporting…".into();
         self.exporting = true;
@@ -1131,18 +1052,42 @@ impl App {
     }
 
     /// Show the last failure (full yt-dlp/export text) with Copy/Dismiss and,
-    /// when the message looks like an outdated binary, an "Update yt-dlp" button.
+    /// when the message looks like an outdated binary, an "Update yt-dlp"
+    /// button, or like an age/bot-check wall, a browser-cookies picker.
     fn error_panel(&mut self, ui: &mut egui::Ui) {
         let Some(err) = self.last_error.clone() else { return };
         const ERROR_MAX_HEIGHT: f32 = 120.0;
         ui.add_space(4.0);
         ui.horizontal(|ui| {
+            // Match the combo box to the buttons' height so it lines up with
+            // them instead of sitting shorter in the row.
+            ui.spacing_mut().interact_size.y = button_height(ui);
             ui.colored_label(egui::Color32::LIGHT_RED, "Error");
             if ytdlp::suggests_update(&err) {
                 let label = if self.ytdlp_updating { "Updating…" } else { "Update yt-dlp" };
                 if ui.add_enabled(!self.ytdlp_updating, egui::Button::new(label)).clicked() {
                     self.start_ytdlp_update();
                 }
+            }
+            if ytdlp::suggests_cookies(&err) {
+                let selected_text = match &self.settings.cookies {
+                    Some(CookieSource::Browser(browser)) => Browser::ALL
+                        .iter()
+                        .find(|(b, _)| b == browser)
+                        .map_or("Use cookies from browser", |(_, label)| label),
+                    _ => "Use cookies from browser",
+                };
+                egui::ComboBox::from_id_salt("error_cookies_browser_select")
+                    .selected_text(selected_text)
+                    .show_ui(ui, |ui| {
+                        for (browser, label) in Browser::ALL {
+                            let is_selected =
+                                matches!(&self.settings.cookies, Some(CookieSource::Browser(b)) if *b == browser);
+                            if ui.selectable_label(is_selected, label).clicked() {
+                                self.settings.cookies = Some(CookieSource::Browser(browser));
+                            }
+                        }
+                    });
             }
             if ui.button("Copy").clicked() {
                 ui.ctx().copy_text(err.clone());
@@ -1174,25 +1119,25 @@ impl App {
         /// the rest of its column without the field overflowing.
         const SCALE_VALUE_W: f32 = 64.0;
 
-        let current = self.ui_scale;
+        let current = self.settings.ui_scale;
         let mut pending = self.pending_scale;
         let mut apply_to = None;
 
         let cache_dir = managed_cache_dir();
         let cache_bytes = dir_size(&cache_dir);
-        let effective_dir = self.effective_download_dir();
-        let mut delete_on_exit = self.delete_cache_on_exit;
+        let effective_dir = self.settings.effective_download_dir();
+        let mut delete_on_exit = self.settings.delete_cache_on_exit;
         let mut new_download_dir: Option<Option<PathBuf>> = None;
-        let output_display = match &self.output_dir {
+        let output_display = match &self.settings.output_dir {
             Some(d) => d.display().to_string(),
             None => "Not set — dialog opens at the system default".to_owned(),
         };
         let mut new_output_dir: Option<Option<PathBuf>> = None;
-        let mut open_dir_on_save = self.open_dir_on_save;
+        let mut open_dir_on_save = self.settings.open_dir_on_save;
         let mut clear_cache = false;
-        let keybinds = self.keybinds;
+        let keybinds = self.settings.keybinds;
         let mut rebinding = self.rebinding;
-        let mut theme = self.theme;
+        let mut theme = self.settings.theme;
 
         // Lazily resolve the version once per open (cleared after an update so it
         // refetches); errors are cached too so it doesn't re-probe every frame.
@@ -1208,6 +1153,7 @@ impl App {
         let mut reset_tools = false;
         let mut start_update_check = false;
         let update_state = self.update_state.clone();
+        let mut cookies = self.settings.cookies.clone();
 
         egui::Window::new("Settings")
             .open(&mut self.show_settings)
@@ -1379,6 +1325,51 @@ impl App {
                 ui.small("Reinstall the yt-dlp and ffmpeg copies shipped with the app. Takes effect on restart.");
 
                 ui.add_space(SECTION_GAP);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().interact_size.y = button_height(ui);
+                    ui.label("Cookies:");
+                    // yt-dlp accepts only one cookie source per run, so the
+                    // browser and file pickers are laid out as alternatives —
+                    // picking one clears the other, rather than nesting a
+                    // source-select dropdown a reader has to open first.
+                    let selected_text = match &cookies {
+                        Some(CookieSource::Browser(b)) => Browser::ALL
+                            .iter()
+                            .find(|(x, _)| x == b)
+                            .map_or("None", |(_, label)| label),
+                        Some(CookieSource::File(_)) => "File selected",
+                        None => "None",
+                    };
+                    egui::ComboBox::from_id_salt("cookies_from_browser_select")
+                        .selected_text(selected_text)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut cookies, None, "None");
+                            for (browser, label) in Browser::ALL {
+                                ui.selectable_value(
+                                    &mut cookies,
+                                    Some(CookieSource::Browser(browser)),
+                                    label,
+                                );
+                            }
+                        });
+                    ui.label("OR");
+                    if ui.button("Choose cookies file…").clicked() {
+                        if let Some(picked) = rfd::FileDialog::new().pick_file() {
+                            cookies = Some(CookieSource::File(picked));
+                        }
+                    }
+                });
+                if let Some(CookieSource::File(path)) = &cookies {
+                    ui.weak(path.display().to_string());
+                }
+                ui.small(
+                    "Needed for age-restricted or members-only videos. \"From browser\" needs \
+                     the browser closed if it reports the cookie database is locked; a cookies \
+                     file (exported via a browser extension, e.g. \"Get cookies.txt\") works \
+                     with the browser left open.",
+                );
+
+                ui.add_space(SECTION_GAP);
                 ui.separator();
                 ui.add_space(SECTION_GAP);
                 ui.label(APP_DISPLAY_NAME);
@@ -1421,29 +1412,30 @@ impl App {
         }
         self.pending_scale = pending;
         if let Some(scale) = apply_to {
-            self.ui_scale = scale;
+            self.settings.ui_scale = scale;
             self.pending_scale = scale;
             ctx.set_zoom_factor(scale);
         }
-        if theme != self.theme {
-            self.theme = theme;
+        if theme != self.settings.theme {
+            self.settings.theme = theme;
             apply_theme(ctx, theme);
         }
-        self.delete_cache_on_exit = delete_on_exit;
-        self.open_dir_on_save = open_dir_on_save;
+        self.settings.delete_cache_on_exit = delete_on_exit;
+        self.settings.open_dir_on_save = open_dir_on_save;
         if let Some(dir) = new_download_dir {
-            self.download_dir = dir;
+            self.settings.download_dir = dir;
         }
         if let Some(dir) = new_output_dir {
-            self.output_dir = dir;
+            self.settings.output_dir = dir;
         }
         if clear_cache {
             clear_dir(&cache_dir);
         }
+        self.settings.cookies = cookies;
 
         // While an action is capturing, the next key press rebinds it (Esc
         // cancels). The main shortcut handler is suppressed during capture.
-        self.keybinds = keybinds;
+        self.settings.keybinds = keybinds;
         if let Some(bind) = rebinding {
             let captured = ctx.input(|i| {
                 i.events.iter().find_map(|e| match e {
@@ -1455,7 +1447,7 @@ impl App {
             });
             if let Some((key, ctrl, shift)) = captured {
                 if key != egui::Key::Escape {
-                    self.keybinds.rebind(bind, Shortcut { key, ctrl, shift });
+                    self.settings.keybinds.rebind(bind, Shortcut { key, ctrl, shift });
                 }
                 rebinding = None;
             }
@@ -1495,11 +1487,12 @@ impl App {
                         .inner;
                     if (fetch.clicked() || submitted) && !is_worker_busy && !self.url.is_empty() {
                         let url = self.url.clone();
+                        let cookies = self.settings.cookies.clone();
                         self.reset_for_new_video();
                         self.info = None;
                         self.status = "fetching…".into();
                         self.spawn(move |tx| {
-                            let _ = tx.send(match ytdlp::fetch_info(&url) {
+                            let _ = tx.send(match ytdlp::fetch_info(&url, cookies.as_ref()) {
                                 Ok(info) => Msg::Info(info),
                                 Err(e) => Msg::Error(e.to_string()),
                             });
@@ -1519,7 +1512,7 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icon_button(ui, settings_icon(), "Settings").clicked() {
                             self.show_settings = true;
-                            self.pending_scale = self.ui_scale;
+                            self.pending_scale = self.settings.ui_scale;
                         }
                     });
                 },
@@ -1578,7 +1571,8 @@ impl App {
                             self.want_audio,
                         );
                         let url = self.url.clone();
-                        let dir = self.effective_download_dir();
+                        let cookies = self.settings.cookies.clone();
+                        let dir = self.settings.effective_download_dir();
                         let _ = std::fs::create_dir_all(&dir);
                         self.status = "downloading…".into();
                         self.progress = Some((0, 0));
@@ -1589,6 +1583,7 @@ impl App {
                             let result = ytdlp::download(
                                 &url,
                                 selector.as_deref(),
+                                cookies.as_ref(),
                                 &dir,
                                 &cancel,
                                 |downloaded, total| {
@@ -1965,8 +1960,8 @@ impl App {
         let set_pos = self.awaiting_release.map_or(cur, |(_, pos)| pos);
         let in_time = fmt_time(self.in_secs);
         let out_time = fmt_time(self.out_secs);
-        let start_label = format!("Set Start ({})", self.keybinds.set_start.label());
-        let end_label = format!("Set End ({})", self.keybinds.set_end.label());
+        let start_label = format!("Set Start ({})", self.settings.keybinds.set_start.label());
+        let end_label = format!("Set End ({})", self.settings.keybinds.set_end.label());
         let left_w = icon_btn_w(ui, bracket_icon_w, &start_label) + gap + text_w(ui, &in_time, &mono_font);
         let right_w = text_w(ui, &out_time, &mono_font) + gap + icon_btn_w(ui, bracket_icon_w, &end_label);
         let center_w = play_selection_w + gap + btn_w(ui, "⏸ Pause");
@@ -2096,13 +2091,15 @@ impl App {
             |ui| {
                 ui.add_sized(
                     egui::vec2(pct_w, transport_h),
-                    egui::Label::new(format!("{:.0}%", self.volume * 100.0)),
+                    egui::Label::new(format!("{:.0}%", self.settings.volume * 100.0)),
                 );
                 ui.spacing_mut().slider_width = VOLUME_SLIDER_WIDTH;
-                let vol = ui.add(egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false));
+                let vol = ui.add(
+                    egui::Slider::new(&mut self.settings.volume, 0.0..=1.0).show_value(false),
+                );
                 if vol.changed() {
                     if let Some(audio) = &self.audio {
-                        audio.set_volume(self.volume);
+                        audio.set_volume(self.settings.volume);
                     }
                 }
                 ui.label("🔊");
@@ -2211,7 +2208,8 @@ impl App {
                 ui.add_enabled_ui(compat_applies, |ui| {
                     // Right-to-left layout: add the switch first so the label lands
                     // to its left, reading "Compatible ▢".
-                    toggle_switch(ui, &mut self.compatibility_mode).on_hover_text(compat_hover);
+                    toggle_switch(ui, &mut self.settings.compatibility_mode)
+                        .on_hover_text(compat_hover);
                     ui.label("Compatible").on_hover_text(compat_hover);
                 });
 
@@ -2232,7 +2230,7 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
-        if self.delete_cache_on_exit {
+        if self.settings.delete_cache_on_exit {
             clear_dir(&managed_cache_dir());
         }
     }
@@ -2240,24 +2238,7 @@ impl Drop for App {
 
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, SCALE_STORAGE_KEY, &self.ui_scale);
-        eframe::set_value(storage, DOWNLOAD_DIR_KEY, &self.download_dir);
-        eframe::set_value(storage, OUTPUT_DIR_KEY, &self.output_dir);
-        eframe::set_value(storage, DELETE_ON_EXIT_KEY, &self.delete_cache_on_exit);
-        eframe::set_value(storage, OPEN_DIR_ON_SAVE_KEY, &self.open_dir_on_save);
-        eframe::set_value(storage, COMPATIBILITY_MODE_KEY, &self.compatibility_mode);
-        eframe::set_value(storage, VOLUME_KEY, &self.volume);
-        eframe::set_value(storage, THEME_KEY, &theme_pref_name(self.theme).to_owned());
-        // Persist each shortcut as (key name, ctrl, shift) so we don't depend on
-        // egui's serde feature; keyed by stable action id so the loader is order-proof.
-        let keys: Vec<(String, String, bool, bool)> = Bind::ALL
-            .iter()
-            .map(|(bind, _)| {
-                let sc = self.keybinds.shortcut(*bind);
-                (bind.id().to_owned(), sc.key.name().to_owned(), sc.ctrl, sc.shift)
-            })
-            .collect();
-        eframe::set_value(storage, KEYBINDS_KEY, &keys);
+        self.settings.save(storage);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -2279,7 +2260,7 @@ impl eframe::App for App {
         // Clip + playback shortcuts, unless a text field has focus or Settings is
         // capturing a key. Set start/end mirror the buttons' position guards.
         if ready && self.rebinding.is_none() && !ctx.wants_keyboard_input() {
-            let kb = self.keybinds;
+            let kb = self.settings.keybinds;
             let cur = self.decoder.as_ref().map(|d| d.current_secs);
             if ctx.input(|i| shortcut_pressed(i, kb.play_pause)) {
                 self.toggle_play(now);
@@ -2397,14 +2378,14 @@ impl eframe::App for App {
                 let mut title = self.video_title.clone().unwrap_or_default();
                 let mut pick_output = false;
                 let ext = self.video_format.extension();
-                let folder_label = match &self.output_dir {
+                let folder_label = match &self.settings.output_dir {
                     Some(d) => d
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| d.display().to_string()),
                     None => "Choose folder…".to_owned(),
                 };
-                let folder_hover = match &self.output_dir {
+                let folder_hover = match &self.settings.output_dir {
                     Some(d) => format!("Saving into {}\n(set a default in Settings)", d.display()),
                     None => "Pick the folder to save into (set a default in Settings)".to_owned(),
                 };
@@ -2446,7 +2427,7 @@ impl eframe::App for App {
                 }
                 if pick_output {
                     if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        self.output_dir = Some(folder);
+                        self.settings.output_dir = Some(folder);
                     }
                 }
                 ui.add_space(4.0);
