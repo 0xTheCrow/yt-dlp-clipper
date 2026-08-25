@@ -17,7 +17,7 @@ const THEME_KEY: &str = "theme";
 const KEYBINDS_KEY: &str = "keybinds";
 const COOKIES_KEY: &str = "cookies_source";
 
-const DEFAULT_UI_SCALE: f32 = 1.0;
+pub(crate) const DEFAULT_UI_SCALE: f32 = 1.0;
 const DEFAULT_VOLUME: f32 = 0.5;
 
 /// Settings that persist between sessions via eframe storage.
