@@ -36,6 +36,28 @@ pub struct Decoder {
     current_pts: i64,
 }
 
+/// Playable length of a file that carries audio but no video, so an audio-only
+/// source still gets a timeline to trim against. Errors when the file has no
+/// audio stream either.
+pub fn audio_duration_secs(path: &str) -> Result<f64> {
+    ffmpeg::init()?;
+    let ictx = ffmpeg::format::input(&path)?;
+    let stream = ictx
+        .streams()
+        .best(Type::Audio)
+        .ok_or_else(|| anyhow!("no audio stream found"))?;
+
+    let time_base = f64::from(stream.time_base());
+    // WebM/Matroska leaves the per-stream duration unset; fall back to the
+    // container duration (in AV_TIME_BASE units) so the timeline isn't zero.
+    let secs = if stream.duration() > 0 {
+        stream.duration() as f64 * time_base
+    } else {
+        ictx.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE)
+    };
+    Ok(secs.max(0.0))
+}
+
 impl Decoder {
     pub fn open(path: &str) -> Result<Self> {
         ffmpeg::init()?;
@@ -57,7 +79,6 @@ impl Decoder {
             ((container_secs / time_base) as i64).max(0)
         };
 
-        // frames-per-second, from the stream's average frame rate
         let fps = f64::from(stream.avg_frame_rate());
         let fps = if fps > 0.0 { fps } else { DEFAULT_FPS };
         // one frame in time-base units, at least 1 so stepping always moves
@@ -117,8 +138,6 @@ impl Decoder {
         }
     }
 
-    // --- public stepping API -------------------------------------------------
-
     /// Decode the next frame in presentation order. None at end of stream.
     pub fn step_forward(&mut self) -> Option<egui::ColorImage> {
         let mut frame = Video::empty();
@@ -146,11 +165,69 @@ impl Decoder {
                 }
                 image
             }
-            Ordering::Less => {
-                let target = (self.current_pts - (-n) * self.frame_dur_ts).max(0);
-                self.seek_exact(target)
-            }
+            Ordering::Less => self.step_backward_by((-n) as usize),
             Ordering::Equal => None,
+        }
+    }
+
+    /// Land exactly `steps_back` frames before the current position. Actual
+    /// per-frame pts deltas round to ±1 time-base unit around the nominal
+    /// `frame_dur_ts` (VFR sources drift further), so subtracting
+    /// `steps_back * frame_dur_ts` from `current_pts` can undershoot the true
+    /// target and land back on the current frame — which then never advances,
+    /// since every further step recomputes the same target from the same
+    /// unchanged `current_pts`. Counting real decoded frames instead of pts
+    /// arithmetic is exact regardless of drift.
+    fn step_backward_by(&mut self, steps_back: usize) -> Option<egui::ColorImage> {
+        let target_pts = self.pts_n_frames_before_current(steps_back);
+        self.seek_exact(target_pts)
+    }
+
+    /// Find the pts of the frame `steps_back` presentation-order positions
+    /// before `current_pts`. A single keyframe interval may hold fewer than
+    /// `steps_back` frames — held or rapid-repeat backward stepping (see
+    /// `decoder_thread`'s request coalescing) can ask for far more frames back
+    /// than the current GOP contains — so this retries from the keyframe
+    /// before that one, and the one before that, until it has collected
+    /// enough or reached the start of the file.
+    fn pts_n_frames_before_current(&mut self, steps_back: usize) -> i64 {
+        let mut keyframe_search_pts = self.current_pts;
+        // Detects "no progress" across retries, e.g. current_pts already IS a
+        // keyframe: the first pass then finds it with zero frames before it,
+        // and comparing against the search target (which equals current_pts
+        // on that pass) would wrongly look like "no earlier keyframe exists".
+        let mut prev_landed_keyframe_pts = i64::MAX;
+        loop {
+            self.seek_container(keyframe_search_pts);
+
+            let mut history: std::collections::VecDeque<i64> =
+                std::collections::VecDeque::with_capacity(steps_back + 1);
+            let mut landed_keyframe_pts = None;
+            let mut frame = Video::empty();
+            let mut last_pts = 0;
+            while self.receive_next(&mut frame) {
+                let pts = frame.pts().unwrap_or(last_pts);
+                last_pts = pts;
+                landed_keyframe_pts.get_or_insert(pts);
+                if pts >= self.current_pts {
+                    break;
+                }
+                if history.len() == steps_back {
+                    history.pop_front();
+                }
+                history.push_back(pts);
+            }
+
+            if history.len() >= steps_back {
+                return history[0];
+            }
+            let landed = landed_keyframe_pts.unwrap_or(0);
+            if landed <= 0 || landed >= prev_landed_keyframe_pts {
+                // Already at the earliest keyframe: this is as far back as it goes.
+                return history.front().copied().unwrap_or(0);
+            }
+            prev_landed_keyframe_pts = landed;
+            keyframe_search_pts = landed - 1;
         }
     }
 
@@ -160,17 +237,19 @@ impl Decoder {
         self.seek_exact(target.clamp(0, self.duration_ts.max(0)))
     }
 
-    // --- internals -----------------------------------------------------------
-
-    /// Seek to the keyframe at/before `target_pts`, then decode forward until
-    /// the first frame whose pts >= target_pts.
-    fn seek_exact(&mut self, target_pts: i64) -> Option<egui::ColorImage> {
+    /// Seek the container to the keyframe at or before `target_pts` and flush
+    /// the decoder, without decoding anything yet.
+    fn seek_container(&mut self, target_pts: i64) {
         // The container seek works in AV_TIME_BASE units; `..seek_ts` keeps the
         // landing keyframe at or before the target.
         let seek_ts =
             (target_pts as f64 * self.time_base * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
         let _ = self.ictx.seek(seek_ts, ..seek_ts);
         self.decoder.flush();
+    }
+
+    fn seek_exact(&mut self, target_pts: i64) -> Option<egui::ColorImage> {
+        self.seek_container(target_pts);
 
         let mut frame = Video::empty();
         let mut last_pts = 0;
@@ -185,7 +264,6 @@ impl Decoder {
         None
     }
 
-    /// Pull packets and feed the decoder until one frame is produced.
     /// Returns false at end of stream.
     fn receive_next(&mut self, frame: &mut Video) -> bool {
         loop {

@@ -53,6 +53,28 @@ pub fn h264_with_audio() -> PathBuf {
     .clone()
 }
 
+/// Opus audio in webm with no video stream — mirrors a `bestaudio` YouTube
+/// download. WebM leaves the per-stream duration unset, so this also covers the
+/// container-duration fallback.
+pub fn opus_audio_only() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        generate(
+            "fixture_opus_audio_only.webm",
+            &["-map", "1:a", "-c:a", "libopus"],
+        )
+    })
+    .clone()
+}
+
+/// AAC audio with no video stream in m4a, which does carry a per-stream
+/// duration — the other branch of the audio-only duration lookup.
+pub fn aac_audio_only() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| generate("fixture_aac_audio_only.m4a", &["-map", "1:a", "-c:a", "aac"]))
+        .clone()
+}
+
 /// VP9 video (no audio) in webm — mirrors a YouTube-style merge codec.
 pub fn vp9() -> PathBuf {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -60,6 +82,19 @@ pub fn vp9() -> PathBuf {
         generate(
             "fixture_vp9.webm",
             &["-map", "0:v", "-c:v", "libvpx-vp9", "-b:v", "200k"],
+        )
+    })
+    .clone()
+}
+
+/// H.264 with a keyframe every 5 frames, so a multi-frame backward jump
+/// crosses several keyframe boundaries within the fixture's short duration.
+pub fn h264_short_gop() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        generate(
+            "fixture_h264_short_gop.mp4",
+            &["-c:v", "libx264", "-g", "5", "-c:a", "aac", "-shortest"],
         )
     })
     .clone()

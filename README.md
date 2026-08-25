@@ -91,24 +91,7 @@ cargo test             # unit + integration tests (need ffmpeg + ffprobe)
 
 ## Packaging (distributable builds)
 
-Scripts in `scripts/` produce self-contained bundles that ship `yt-dlp` and
-`ffmpeg` alongside the app, so end users don't install anything:
-
-- **Linux AppImage** — `./scripts/make-appimage.sh` → a single
-  `yt-dlp-clipper-<ver>-x86_64.AppImage`. Builds the normal dynamic release,
-  then bundles the app's `libav*`/`libasound` dependencies plus a static
-  `ffmpeg` and the self-contained `yt-dlp_linux`. Needs `libfuse2` only for the
-  *output* AppImage to run on a double-click.
-- **Windows bundle** — `./scripts/make-windows.sh` cross-compiles from Linux
-  (no Windows/Wine needed) via [cargo-xwin](https://github.com/rust-cross/cargo-xwin),
-  or `scripts/make-windows.ps1` builds natively on Windows. Either produces
-  `yt-dlp-clipper-<ver>-win64.zip` (app exe + `yt-dlp.exe` + `ffmpeg.exe` + DLLs).
-
-The artifact version is read from `version` in `Cargo.toml`. There's also an
-off-by-default `static-ffmpeg` cargo feature that links FFmpeg statically (for
-CI / dependency-free binaries); see `Cargo.toml` for what it needs.
-
-## License
-
-The default dynamic build links system FFmpeg. The packaged releases bundle a
-GPL ffmpeg + x264, making those builds **GPL**.
+Standalone builds (Linux AppImage, Windows exe, macOS dmg) that bundle
+`yt-dlp` and `ffmpeg` — no install required — are published on the
+[Releases page](https://github.com/0xTheCrow/yt-dlp-clipper/releases). To
+build one yourself, see `scripts/make-{appimage,windows,macos}.sh`.

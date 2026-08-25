@@ -85,7 +85,6 @@ fn extract_to_managed(bytes: &[u8], name: &str) -> Option<PathBuf> {
     Some(dest)
 }
 
-// Fallbacks for when embedded bytes are available (bundle-tools) or not.
 #[cfg(feature = "bundle-tools")]
 fn embedded_ytdlp() -> Option<PathBuf> {
     extract_to_managed(BUNDLED_YTDLP_BYTES, YTDLP_EXE)
@@ -95,14 +94,24 @@ fn embedded_ytdlp() -> Option<PathBuf> {
     None
 }
 
+/// App version whose embedded ffmpeg populated the managed dir; a mismatch means
+/// the copy on disk predates an update that ships a newer ffmpeg.
+#[cfg(feature = "bundle-tools")]
+const FFMPEG_VERSION_STAMP: &str = ".ffmpeg-version";
+
 #[cfg(feature = "bundle-tools")]
 fn embedded_ffmpeg_cli() -> Option<PathBuf> {
-    // The managed copy persists between runs; only extract on first use.
-    let managed = managed_bin_dir()?.join(FFMPEG_EXE);
-    if managed.is_file() {
+    let dir = managed_bin_dir()?;
+    let managed = dir.join(FFMPEG_EXE);
+    let stamp = dir.join(FFMPEG_VERSION_STAMP);
+    let is_stamp_current = std::fs::read_to_string(&stamp)
+        .is_ok_and(|stamped| stamped.trim() == env!("CARGO_PKG_VERSION"));
+    if is_stamp_current && managed.is_file() {
         return Some(managed);
     }
-    extract_to_managed(BUNDLED_FFMPEG_CLI_BYTES, FFMPEG_EXE)
+    let extracted = extract_to_managed(BUNDLED_FFMPEG_CLI_BYTES, FFMPEG_EXE)?;
+    let _ = std::fs::write(&stamp, env!("CARGO_PKG_VERSION"));
+    Some(extracted)
 }
 #[cfg(not(feature = "bundle-tools"))]
 fn embedded_ffmpeg_cli() -> Option<PathBuf> {
@@ -119,7 +128,6 @@ pub(crate) fn resolve_ytdlp() -> Option<PathBuf> {
             return Some(m.clone());
         }
     }
-    // Try a file source we can seed from (bundle beside exe, or PATH).
     if let Some(source) = bundled_binary(YTDLP_EXE).or_else(|| find_in_path(YTDLP_EXE)) {
         return match &managed {
             Some(m) if std::fs::copy(&source, m).is_ok() => {
@@ -129,7 +137,6 @@ pub(crate) fn resolve_ytdlp() -> Option<PathBuf> {
             _ => Some(source),
         };
     }
-    // No file found; extract from bytes embedded at compile time.
     embedded_ytdlp()
 }
 
@@ -139,6 +146,15 @@ pub(crate) fn resolve_ffmpeg() -> Option<PathBuf> {
     bundled_binary(FFMPEG_EXE)
         .or_else(|| find_in_path(FFMPEG_EXE))
         .or_else(embedded_ffmpeg_cli)
+}
+
+/// Delete the managed tool binaries so the next launch re-seeds them. The paths
+/// resolved at startup live in a `OnceLock` for the process lifetime, so the
+/// running app keeps invoking the deleted copies until it restarts.
+pub(crate) fn reset_bundled_tools() {
+    if let Some(dir) = managed_bin_dir() {
+        clear_dir(&dir);
+    }
 }
 
 /// Total size, in bytes, of the files directly in `dir`.

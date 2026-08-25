@@ -3,7 +3,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use yt_dlp_clipper::export::{export, AudioFormat, ExportSpec, Mode};
+use yt_dlp_clipper::export::{audio_extension, export, AudioFormat, ExportSpec, Mode};
 
 /// H.264 video + Opus audio in MKV — mirrors a YouTube download whose Opus
 /// audio MP4 can't hold via stream copy.
@@ -202,7 +202,6 @@ fn compat_transcodes_av1_into_h264_in_mp4() {
 
 #[test]
 fn noncompat_copies_av1_into_mp4() {
-    // With compatibility off, AV1 is copied into MP4 as-is.
     let out = run_from_compat(av1_in_mp4(), Mode::Full, "export_av1_raw.mp4", 0.0, common::DURATION_SECS, false);
     assert_eq!(codec_of(&out, "video"), "av1", "av1 should be copied unchanged");
 }
@@ -217,7 +216,6 @@ fn compat_reencodes_10bit_h264_to_8bit() {
 
 #[test]
 fn noncompat_copies_10bit_h264() {
-    // With compatibility off, the 10-bit stream is copied through untouched.
     let out = run_from_compat(h264_10bit(), Mode::Full, "export_10bit_raw.mp4", 0.0, common::DURATION_SECS, false);
     assert_eq!(pix_fmt_of(&out), "yuv420p10le", "10-bit should be preserved");
 }
@@ -231,7 +229,6 @@ fn compat_reencodes_ac3_audio_to_aac() {
 
 #[test]
 fn noncompat_copies_ac3_into_mp4() {
-    // With compatibility off, AC-3 is copied into MP4 as-is.
     let out = run_from_compat(h264_with_ac3(), Mode::Full, "export_ac3_raw.mp4", 0.0, common::DURATION_SECS, false);
     assert_eq!(codec_of(&out, "audio"), "ac3", "ac3 should be copied unchanged");
 }
@@ -318,4 +315,124 @@ fn full_downscale_reencodes_from_copyable_source() {
     // h264-in-mp4 would normally remux-copy; a downscale forces a re-encode.
     let (w, h) = run_scaled(Mode::Full, "scaled_full.mp4", 120);
     assert_eq!((w, h), (160, 120), "full should downscale to 160x120");
+}
+
+/// Export `input` over a zero-length range, returning the result unwrapped.
+fn run_empty_range(input: std::path::PathBuf, mode: Mode, out_name: &str) -> anyhow::Result<()> {
+    common::init();
+    let out = std::env::temp_dir().join(out_name);
+    let _ = std::fs::remove_file(&out);
+    export(&ExportSpec {
+        input: input.to_string_lossy().into_owned(),
+        output: out.to_string_lossy().into_owned(),
+        start_secs: 1.0,
+        end_secs: 1.0,
+        mode,
+        scale_height: None,
+        compatibility_mode: true,
+    })
+}
+
+#[test]
+fn empty_range_fails_clip_and_audio_only() {
+    // A video that fails to open leaves the clip range at zero.
+    assert!(
+        run_empty_range(h264_with_opus(), Mode::Clip, "empty_range_clip.mp4").is_err(),
+        "clip over an empty range should error"
+    );
+    assert!(
+        run_empty_range(h264_with_opus(), Mode::AudioOnly(AudioFormat::Mp3), "empty_range.mp3")
+            .is_err(),
+        "audio-only over an empty range should error"
+    );
+}
+
+#[test]
+fn empty_range_still_saves_full_video() {
+    run_empty_range(h264_with_opus(), Mode::Full, "empty_range_full.mkv")
+        .expect("full should ignore the clip range");
+}
+
+/// A `bestaudio` download has no video stream, and every audio-only target must
+/// still trim it: re-encoded to MP3/AAC, and stream-copied for `Original`.
+#[test]
+fn audio_only_exports_from_a_source_with_no_video() {
+    for (format, out_name) in [
+        (AudioFormat::Mp3, "audio_source.mp3"),
+        (AudioFormat::Aac, "audio_source.m4a"),
+        (AudioFormat::Original, "audio_source.opus"),
+    ] {
+        let out = run_from(
+            common::opus_audio_only(),
+            Mode::AudioOnly(format),
+            out_name,
+            0.5,
+            2.0,
+        );
+        assert_eq!(
+            probe_stream_types(&out),
+            vec!["audio"],
+            "{out_name} should hold exactly one audio stream"
+        );
+        let dur = probe_duration(&out);
+        assert!(
+            (dur - 1.5).abs() < 0.1,
+            "{out_name} duration {dur} not ~1.5"
+        );
+    }
+}
+
+/// An `Original` copy lands in whichever container fits the source codec, which
+/// it has to read from the audio stream when there is no video stream to probe.
+#[test]
+fn audio_extension_of_a_source_with_no_video_follows_the_codec() {
+    common::init();
+    let opus = common::opus_audio_only();
+    assert_eq!(
+        audio_extension(&opus.to_string_lossy(), AudioFormat::Original).unwrap(),
+        "opus"
+    );
+}
+
+/// Saving the full file re-encodes audio only because the container can't hold
+/// the source codec, so the clip range must not narrow it — otherwise the audio
+/// stops partway through a full-length video.
+#[test]
+fn full_keeps_whole_audio_when_the_codec_forces_a_reencode() {
+    let out = run_from(h264_with_opus(), Mode::Full, "full_reenc_audio.mp4", 0.5, 2.0);
+    let audio = audio_stream_duration(&out);
+    assert!(
+        (audio - common::DURATION_SECS).abs() < 0.15,
+        "full audio duration {audio} was trimmed to the clip range instead of \
+         keeping the whole {} seconds",
+        common::DURATION_SECS
+    );
+}
+
+/// The UI disables both video saves for an audio-only source. Underneath, a clip
+/// still refuses (it has no frames to cut against) while saving the full file
+/// degrades to writing the one stream the source does have.
+#[test]
+fn video_modes_handle_a_source_with_no_video() {
+    common::init();
+    let clip = run_no_video(Mode::Clip, "no_video_clip.mp4");
+    assert!(clip.is_err(), "a clip with no video stream should error");
+
+    let out = std::env::temp_dir().join("no_video_full.mp4");
+    run_no_video(Mode::Full, "no_video_full.mp4").expect("full should write the audio it has");
+    assert_eq!(probe_stream_types(&out), vec!["audio"]);
+}
+
+fn run_no_video(mode: Mode, out_name: &str) -> anyhow::Result<()> {
+    let out = std::env::temp_dir().join(out_name);
+    let _ = std::fs::remove_file(&out);
+    export(&ExportSpec {
+        input: common::opus_audio_only().to_string_lossy().into_owned(),
+        output: out.to_string_lossy().into_owned(),
+        start_secs: 0.5,
+        end_secs: 2.0,
+        mode,
+        scale_height: None,
+        compatibility_mode: true,
+    })
 }
