@@ -28,7 +28,7 @@ jobs:
   linux:
     runs-on: ubuntu-22.04  # older glibc => AppImage runs on a wider range of desktops
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Derive version from tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -47,7 +47,7 @@ jobs:
       - name: Build Linux AppImage
         run: ./scripts/make-appimage.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: linux
           path: yt-dlp-clipper-*-x86_64.AppImage
@@ -74,7 +74,7 @@ jobs:
       # Private vcpkg root the manifest installs into; VCPKG_ROOT for the cargo build.
       FF_VCPKG_ROOT: C:\ff
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Derive version from tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -89,7 +89,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Cache vcpkg packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}\vcpkg-cache
           key: vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
@@ -149,7 +149,7 @@ jobs:
           VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
           cp target/release/yt-dlp-clipper.exe "yt-dlp-clipper-${VERSION}-win64.exe"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: windows
           path: yt-dlp-clipper-*-win64.exe
@@ -157,7 +157,7 @@ jobs:
   macos:
     runs-on: macos-14   # Apple Silicon (arm64) only; Intel macOS dropped (macos-13 image retired Dec 2025)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Derive version from tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -172,7 +172,7 @@ jobs:
       - name: Build macOS .app + .dmg
         run: ./scripts/make-macos.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: macos
           path: yt-dlp-clipper-*-macos-*.dmg
@@ -183,12 +183,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Collect build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: dist
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           files: dist/**/*
