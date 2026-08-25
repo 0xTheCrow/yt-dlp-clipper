@@ -86,3 +86,16 @@ pub fn vp9() -> PathBuf {
     })
     .clone()
 }
+
+/// H.264 with a keyframe every 5 frames, so a multi-frame backward jump
+/// crosses several keyframe boundaries within the fixture's short duration.
+pub fn h264_short_gop() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        generate(
+            "fixture_h264_short_gop.mp4",
+            &["-c:v", "libx264", "-g", "5", "-c:a", "aac", "-shortest"],
+        )
+    })
+    .clone()
+}

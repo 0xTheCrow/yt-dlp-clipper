@@ -78,6 +78,54 @@ fn step_backward_goes_back_one_frame() {
     );
 }
 
+/// VP9 in webm (like the vp9() fixture below) has a single keyframe for the
+/// whole clip, so backward stepping repeatedly re-decodes from frame 0.
+/// Nominal frame-duration arithmetic drifts against the real, rounded pts
+/// spacing on this codec, which used to strand the playhead on the second
+/// step back: the recomputed target landed back on the same current frame
+/// instead of the true previous one, and every further step repeated that.
+#[test]
+fn repeated_step_backward_keeps_moving_on_sparse_keyframes() {
+    let mut dec = open(&common::vp9());
+    dec.seek_secs(2.9).expect("seek frame");
+    let mut before = dec.current_secs();
+    for i in 0..5 {
+        let img = dec.step_by(-1);
+        let after = dec.current_secs();
+        assert!(img.is_some(), "step {i} produced no frame");
+        assert!(after < before, "step {i} got stuck: {before} -> {after}");
+        before = after;
+    }
+}
+
+/// A burst of rapid backward taps coalesces (see `decoder_thread`) into one
+/// large `step_by(-n)`. If `n` crosses more keyframes than the one nearest
+/// the current position holds frames for, the search must keep walking to
+/// earlier keyframes rather than clamping to the start of that one GOP.
+#[test]
+fn large_backward_jump_crosses_keyframe_boundaries() {
+    let mut dec = open(&common::h264_short_gop());
+    dec.seek_secs(2.5).expect("seek frame");
+    let before = dec.current_secs();
+    dec.step_by(-20).expect("frame 20 steps back");
+    let after = dec.current_secs();
+    let expected = before - 20.0 * FRAME_SECS;
+    assert!(
+        (after - expected).abs() < 0.05,
+        "expected near {expected:.4} (20 frames back from {before:.4}), got {after:.4}"
+    );
+}
+
+/// A backward jump larger than the whole video must clamp to the first
+/// frame, not error or hang walking past the start.
+#[test]
+fn backward_jump_beyond_video_length_clamps_to_start() {
+    let mut dec = open(&common::vp9());
+    dec.seek_secs(1.0).expect("seek frame");
+    dec.step_by(-1000).expect("clamped first frame");
+    assert!(dec.current_secs().abs() < 0.05, "expected to clamp to 0, got {}", dec.current_secs());
+}
+
 #[test]
 fn decodes_vp9() {
     let mut dec = open(&common::vp9());
