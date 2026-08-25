@@ -15,6 +15,10 @@ static YTDLP_BIN: OnceLock<PathBuf> = OnceLock::new();
 /// Absolute path to the ffmpeg binary yt-dlp merges with, passed via
 /// `--ffmpeg-location` so yt-dlp doesn't search PATH/CWD for one of its own.
 static FFMPEG_BIN: OnceLock<PathBuf> = OnceLock::new();
+/// Absolute path to the bundled QuickJS runtime, passed via `--js-runtimes` so
+/// yt-dlp can solve YouTube's nsig/PO-token JS challenge without relying on an
+/// external `deno`/`node` install.
+static QJS_BIN: OnceLock<PathBuf> = OnceLock::new();
 
 /// Point every yt-dlp invocation at this exact binary. Call once at startup.
 pub fn set_binary(path: PathBuf) {
@@ -24,6 +28,12 @@ pub fn set_binary(path: PathBuf) {
 /// Tell yt-dlp which ffmpeg to merge with. Call once at startup.
 pub fn set_ffmpeg(path: PathBuf) {
     let _ = FFMPEG_BIN.set(path);
+}
+
+/// Tell yt-dlp which JS runtime to use for its nsig/PO-token solver. Call once
+/// at startup.
+pub fn set_js_runtime(path: PathBuf) {
+    let _ = QJS_BIN.set(path);
 }
 
 /// The resolved yt-dlp path, falling back to the bare name when unset (dev/test
@@ -302,6 +312,20 @@ fn push_cookie_args<'a>(
     }
 }
 
+/// Appends `--js-runtimes quickjs:<path>` when a bundled QuickJS binary was
+/// resolved at startup, so the `web` client's nsig/PO-token challenge can be
+/// solved without an external `deno`/`node` install. This *adds* quickjs
+/// alongside yt-dlp's default `deno` detection rather than replacing it, so a
+/// machine that already has deno on PATH keeps using it (higher priority).
+/// `arg` holds the owned "quickjs:<path>" string `args` borrows from, so it
+/// must outlive `args`.
+fn push_js_runtime_args<'a>(args: &mut Vec<&'a str>, arg: &'a mut String) {
+    if let Some(path) = QJS_BIN.get() {
+        *arg = format!("quickjs:{}", path.to_string_lossy());
+        args.extend(["--js-runtimes", arg.as_str()]);
+    }
+}
+
 /// Fetch metadata (`yt-dlp -J <url>`) without downloading anything. `cookies`
 /// authenticates the request (browser session or a `cookies.txt`), needed for
 /// age-gated or members-only videos.
@@ -309,6 +333,8 @@ pub fn fetch_info(url: &str, cookies: Option<&CookieSource>) -> Result<VideoInfo
     let mut args = vec!["-J", "--no-playlist"];
     let mut cookie_file_path = String::new();
     push_cookie_args(&mut args, cookies, &mut cookie_file_path);
+    let mut js_runtime_arg = String::new();
+    push_js_runtime_args(&mut args, &mut js_runtime_arg);
     // `--` ends option parsing so a URL starting with `-` can't be taken as a
     // yt-dlp flag (e.g. `--exec`, `--config-location`).
     args.extend(["--", url]);
@@ -362,6 +388,8 @@ pub fn download(
     }
     let mut cookie_file_path = String::new();
     push_cookie_args(&mut args, cookies, &mut cookie_file_path);
+    let mut js_runtime_arg = String::new();
+    push_js_runtime_args(&mut args, &mut js_runtime_arg);
     // Pin the ffmpeg used for the video+audio merge to our resolved binary, so
     // yt-dlp can't pick up a planted `ffmpeg` from PATH/CWD.
     let ffmpeg_loc = FFMPEG_BIN.get().map(|p| p.to_string_lossy().into_owned());

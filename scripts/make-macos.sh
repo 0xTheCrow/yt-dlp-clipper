@@ -32,10 +32,17 @@ RES_DIR="$APP/Contents/Resources"
 BUNDLE_ID="com.cooper.yt-dlp-clipper"
 VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
 
+# quickjs-ng's prebuilt qjs (~1-2.5MB) — the JS runtime yt-dlp needs to solve
+# YouTube's nsig/PO-token challenge for its `web` client (the only client that
+# honors cookies for age-restricted videos). Tiny next to ffmpeg/yt-dlp; it
+# only adds to yt-dlp's own default `deno` detection, never replaces it.
+QJS_BASE_URL='https://github.com/quickjs-ng/quickjs/releases/latest/download'
 ARCH="$(uname -m)"                  # arm64 (Apple Silicon) or x86_64 (Intel); host-arch build
 case "$ARCH" in
-    arm64)  FFMPEG_URL='https://www.osxexperts.net/ffmpeg611arm.zip' ;;  # static ffmpeg, arm64
-    x86_64) FFMPEG_URL='https://www.osxexperts.net/ffmpeg611intel.zip' ;; # static ffmpeg, intel
+    arm64)  FFMPEG_URL='https://www.osxexperts.net/ffmpeg611arm.zip'
+            QJS_URL="$QJS_BASE_URL/qjs-darwin-arm64" ;;
+    x86_64) FFMPEG_URL='https://www.osxexperts.net/ffmpeg611intel.zip'
+            QJS_URL="$QJS_BASE_URL/qjs-darwin-x86_64" ;;
     *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
 esac
 YTDLP_URL='https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos'
@@ -67,13 +74,14 @@ export LIBRARY_PATH="$FFMPEG6_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
 cargo build --release
 
 # --- fetch runtime binaries (cached) ------------------------------------------
-echo "==> Fetching yt-dlp + static ffmpeg (cached in build/)"
+echo "==> Fetching yt-dlp + static ffmpeg + qjs (cached in build/)"
 [ -f "$BUILD/yt-dlp" ] || curl -fsSL -o "$BUILD/yt-dlp" "$YTDLP_URL"
+[ -f "$BUILD/qjs" ]    || curl -fsSL -o "$BUILD/qjs" "$QJS_URL"
 [ -f "$BUILD/ffmpeg" ] || {
     curl -fsSL -o "$BUILD/ffmpeg.zip" "$FFMPEG_URL"
     unzip -o -j "$BUILD/ffmpeg.zip" -d "$BUILD" ffmpeg >/dev/null
 }
-chmod +x "$BUILD/yt-dlp" "$BUILD/ffmpeg"
+chmod +x "$BUILD/yt-dlp" "$BUILD/qjs" "$BUILD/ffmpeg"
 
 # --- assemble the .app skeleton -----------------------------------------------
 echo "==> Assembling $APP_NAME.app"
@@ -82,6 +90,7 @@ mkdir -p "$MACOS_DIR" "$RES_DIR"
 cp "$ROOT/target/release/yt-dlp-clipper" "$MACOS_DIR/$APP_NAME"
 cp "$BUILD/yt-dlp"             "$MACOS_DIR/yt-dlp"
 cp "$BUILD/ffmpeg"            "$MACOS_DIR/ffmpeg"
+cp "$BUILD/qjs"                "$MACOS_DIR/qjs"
 chmod +x "$MACOS_DIR/"*
 
 # Icon: convert the existing PNG to a .icns (sips + iconutil ship with macOS).

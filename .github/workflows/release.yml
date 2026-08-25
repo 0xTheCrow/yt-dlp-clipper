@@ -114,8 +114,10 @@ jobs:
           New-Item -ItemType File -Force -Path "$env:FF_VCPKG_ROOT\.vcpkg-root" | Out-Null
 
       # The bundle-tools feature bakes these into the exe and extracts them on first
-      # run: yt-dlp, and the ffmpeg CLI yt-dlp calls to merge streams (a runtime
-      # tool, separate from the libav* linked above).
+      # run: yt-dlp, the ffmpeg CLI yt-dlp calls to merge streams (a runtime tool,
+      # separate from the libav* linked above), and qjs — the JS runtime yt-dlp
+      # needs to solve YouTube's nsig/PO-token challenge for its `web` client (the
+      # only client that honors cookies for age-restricted videos).
       - name: Download embedded tool binaries
         shell: pwsh
         run: |
@@ -123,6 +125,9 @@ jobs:
           Invoke-WebRequest -UseBasicParsing `
             -Uri https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe `
             -OutFile build\windows\yt-dlp.exe
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-windows-x86_64.exe `
+            -OutFile build\windows\qjs.exe
           Invoke-WebRequest -UseBasicParsing `
             -Uri https://github.com/GyanD/codexffmpeg/releases/download/6.0/ffmpeg-6.0-full_build.7z `
             -OutFile build\windows\ffmpeg.7z
@@ -141,6 +146,7 @@ jobs:
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
           BUNDLE_YTDLP: ${{ github.workspace }}\build\windows\yt-dlp.exe
           BUNDLE_FFMPEG_CLI: ${{ github.workspace }}\build\windows\ffmpeg.exe
+          BUNDLE_QJS: ${{ github.workspace }}\build\windows\qjs.exe
         run: cargo build --release --features bundle-tools
 
       - name: Stage release exe

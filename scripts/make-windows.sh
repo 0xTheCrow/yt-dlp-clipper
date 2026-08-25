@@ -33,6 +33,11 @@ FFMPEG_VER='6.0'
 FFMPEG_NAME="ffmpeg-${FFMPEG_VER}-full_build-shared"
 FFMPEG_URL="https://github.com/GyanD/codexffmpeg/releases/download/${FFMPEG_VER}/${FFMPEG_NAME}.7z"
 YTDLP_URL='https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+# quickjs-ng's prebuilt qjs — the JS runtime yt-dlp needs to solve YouTube's
+# nsig/PO-token challenge for its `web` client (the only client that honors
+# cookies for age-restricted videos). Tiny next to ffmpeg/yt-dlp; it only adds
+# to yt-dlp's own default `deno` detection, never replaces it.
+QJS_URL='https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-windows-x86_64.exe'
 
 mkdir -p "$BUILD"
 
@@ -58,6 +63,8 @@ FFMPEG_DIR="$BUILD/$FFMPEG_NAME"
 [ -d "$FFMPEG_DIR" ] || "$SEVENZ" x -y -o"$BUILD" "$FFMPEG_ARCHIVE" >/dev/null
 YTDLP_EXE="$BUILD/yt-dlp.exe"
 [ -f "$YTDLP_EXE" ] || { echo "==> Downloading yt-dlp.exe"; wget -qO "$YTDLP_EXE" "$YTDLP_URL"; }
+QJS_EXE="$BUILD/qjs.exe"
+[ -f "$QJS_EXE" ] || { echo "==> Downloading qjs.exe"; wget -qO "$QJS_EXE" "$QJS_URL"; }
 
 # --- build (cross-compile yt-dlp-clipper.exe) -------------------------------------------
 # ffmpeg-sys finds the import libs + headers via FFMPEG_DIR. bindgen runs libclang
@@ -87,6 +94,7 @@ echo "==> Staging bundle"
 rm -rf "$DIST"; mkdir -p "$DIST/bin"
 cp "target/$TARGET/release/yt-dlp-clipper.exe" "$DIST/yt-dlp-clipper.exe"
 cp "$YTDLP_EXE"                      "$DIST/bin/yt-dlp.exe"
+cp "$QJS_EXE"                        "$DIST/bin/qjs.exe"
 cp "$FFMPEG_DIR/bin/ffmpeg.exe"      "$DIST/bin/ffmpeg.exe"
 # FFmpeg runtime DLLs the app links against (Windows loads these from the exe dir).
 cp "$FFMPEG_DIR"/bin/*.dll "$DIST"

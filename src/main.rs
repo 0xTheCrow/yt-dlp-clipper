@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use yt_dlp_clipper::ytdlp;
 
 use app::App;
-use binaries::{resolve_ffmpeg, resolve_ytdlp};
+use binaries::{resolve_ffmpeg, resolve_qjs, resolve_ytdlp};
 
 /// On-disk identifier for the app-data dir (settings + download cache). Kept
 /// generic and stable so renaming the app doesn't orphan persisted state.
@@ -44,6 +44,9 @@ fn main() -> eframe::Result<()> {
     }
     if let Some(ffmpeg_bin) = resolve_ffmpeg() {
         ytdlp::set_ffmpeg(ffmpeg_bin);
+    }
+    if let Some(qjs_bin) = resolve_qjs() {
+        ytdlp::set_js_runtime(qjs_bin);
     }
 
     let mut cli_path = None;
