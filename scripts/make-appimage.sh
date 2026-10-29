@@ -25,6 +25,12 @@ YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linu
 # This is the runtime ffmpeg CLI yt-dlp merges with; it's independent of the libav*
 # the app links, so its version is not pinned to the build-time FFmpeg.
 FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+# quickjs-ng's prebuilt qjs (~2.5MB) — the JS runtime yt-dlp needs to solve
+# YouTube's nsig/PO-token challenge for its `web` client (the only client that
+# honors cookies for age-restricted videos). Bundled outright since it's tiny
+# next to ffmpeg/yt-dlp; it only adds to yt-dlp's own default `deno` detection,
+# never replaces it.
+QJS_URL="https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-linux-x86_64"
 
 mkdir -p "$BUILD"
 
@@ -37,6 +43,7 @@ echo "==> Fetching tools + bundled binaries (cached in build/)"
 fetch() { wget -nv --tries=3 --timeout=60 --retry-connrefused -O "$1" "$2"; }
 [ -f "$BUILD/linuxdeploy.AppImage" ] || fetch "$BUILD/linuxdeploy.AppImage" "$LINUXDEPLOY_URL"
 [ -f "$BUILD/yt-dlp" ]               || fetch "$BUILD/yt-dlp" "$YTDLP_URL"
+[ -f "$BUILD/qjs" ]                  || fetch "$BUILD/qjs" "$QJS_URL"
 [ -f "$BUILD/ffmpeg" ] || {
     fetch "$BUILD/ffmpeg.tar.xz" "$FFMPEG_URL"
     tar -xf "$BUILD/ffmpeg.tar.xz" -C "$BUILD"
@@ -44,20 +51,23 @@ fetch() { wget -nv --tries=3 --timeout=60 --retry-connrefused -O "$1" "$2"; }
     [ -n "$ffmpeg_bin" ] || { echo "error: no ffmpeg binary in $FFMPEG_URL" >&2; exit 1; }
     cp "$ffmpeg_bin" "$BUILD/ffmpeg"
 }
-chmod +x "$BUILD/linuxdeploy.AppImage" "$BUILD/yt-dlp" "$BUILD/ffmpeg"
+chmod +x "$BUILD/linuxdeploy.AppImage" "$BUILD/yt-dlp" "$BUILD/qjs" "$BUILD/ffmpeg"
 
-echo "==> Assembling AppDir (app + yt-dlp + ffmpeg next to the exe)"
+echo "==> Assembling AppDir (app + yt-dlp + ffmpeg + qjs next to the exe)"
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin"
 cp "$ROOT/target/release/yt-dlp-clipper" "$APPDIR/usr/bin/yt-dlp-clipper"
 cp "$BUILD/yt-dlp"             "$APPDIR/usr/bin/yt-dlp"
 cp "$BUILD/ffmpeg"            "$APPDIR/usr/bin/ffmpeg"
+cp "$BUILD/qjs"                "$APPDIR/usr/bin/qjs"
 chmod +x "$APPDIR/usr/bin/"*
 
 echo "==> Packing AppImage"
 # Pin the output filename (else the appimage plugin derives it from the desktop
-# entry's Name=, "Cooper Clipper", and the release workflow's upload glob misses it).
-export OUTPUT="yt-dlp-clipper-${VERSION}-x86_64.AppImage"
+# entry's Name=, "Cooper Clipper", and the release workflow's upload glob misses
+# it). Deliberately version-less: self-update replaces this file's *contents* in
+# place, so a version-stamped name would start lying the first time it runs.
+export OUTPUT="cooper-clipper-x86_64.AppImage"
 "$BUILD/linuxdeploy.AppImage" \
     --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/yt-dlp-clipper" \
@@ -65,4 +75,4 @@ export OUTPUT="yt-dlp-clipper-${VERSION}-x86_64.AppImage"
     --icon-file "$ROOT/assets/yt-dlp-clipper.png" \
     --output appimage
 
-echo "==> Done: $(ls -1 "$ROOT"/yt-dlp-clipper*.AppImage 2>/dev/null | tail -1)"
+echo "==> Done: $(ls -1 "$ROOT"/cooper-clipper*.AppImage 2>/dev/null | tail -1)"

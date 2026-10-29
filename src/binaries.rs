@@ -1,11 +1,41 @@
 use crate::STORAGE_APP_ID;
 use std::path::{Path, PathBuf};
+use yt_dlp_clipper::launch_lock;
 
 /// Cross-platform directory for downloaded videos, under eframe's app data dir.
 pub(crate) fn managed_cache_dir() -> PathBuf {
     eframe::storage_dir(STORAGE_APP_ID)
         .map(|d| d.join("downloads"))
         .unwrap_or_else(std::env::temp_dir)
+}
+
+/// On-disk record of an in-progress/just-applied self-update swap; see
+/// `updater::stage::PendingSwap`.
+pub(crate) fn update_state_path() -> PathBuf {
+    eframe::storage_dir(STORAGE_APP_ID)
+        .map(|d| d.join("update-state.json"))
+        .unwrap_or_else(|| std::env::temp_dir().join("yt-dlp-clipper-update-state.json"))
+}
+
+/// Directory holding the pre-swap backup, kept until the swapped-in build
+/// commits or the launch-attempt limit rolls it back.
+pub(crate) fn update_backup_dir() -> PathBuf {
+    let dir = eframe::storage_dir(STORAGE_APP_ID)
+        .map(|d| d.join("backup"))
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Directory a release's downloaded/staged payload lands in before it's
+/// probed and swapped into place. Kept until commit so a rollback can retry
+/// without re-downloading.
+pub(crate) fn update_staging_dir(version: &str) -> PathBuf {
+    let dir = eframe::storage_dir(STORAGE_APP_ID)
+        .map(|d| d.join("updates").join(version))
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 /// Platform filenames for the bundled tool binaries.
@@ -17,6 +47,10 @@ const YTDLP_EXE: &str = "yt-dlp";
 const FFMPEG_EXE: &str = "ffmpeg.exe";
 #[cfg(not(windows))]
 const FFMPEG_EXE: &str = "ffmpeg";
+#[cfg(windows)]
+const QJS_EXE: &str = "qjs.exe";
+#[cfg(not(windows))]
+const QJS_EXE: &str = "qjs";
 
 /// Directory holding the running executable, where a packaged build bundles
 /// `yt-dlp`/`ffmpeg` next to the app.
@@ -35,6 +69,8 @@ const BUNDLED_BIN_SUBDIR: &str = "bin";
 const BUNDLED_YTDLP_BYTES: &[u8] = include_bytes!(env!("BUNDLED_YTDLP_PATH"));
 #[cfg(feature = "bundle-tools")]
 const BUNDLED_FFMPEG_CLI_BYTES: &[u8] = include_bytes!(env!("BUNDLED_FFMPEG_CLI_PATH"));
+#[cfg(feature = "bundle-tools")]
+const BUNDLED_QJS_BYTES: &[u8] = include_bytes!(env!("BUNDLED_QJS_PATH"));
 
 /// Locate a bundled tool binary: the `bin/` subfolder beside the exe first
 /// (the packaged layout), then directly beside the exe (dev `target/` builds
@@ -81,6 +117,7 @@ fn set_owner_only(_path: &Path, _mode: u32) {}
 fn extract_to_managed(bytes: &[u8], name: &str) -> Option<PathBuf> {
     let dest = managed_bin_dir()?.join(name);
     std::fs::write(&dest, bytes).ok()?;
+    launch_lock::await_launches_in_progress();
     set_owner_only(&dest, 0o755);
     Some(dest)
 }
@@ -98,23 +135,44 @@ fn embedded_ytdlp() -> Option<PathBuf> {
 /// the copy on disk predates an update that ships a newer ffmpeg.
 #[cfg(feature = "bundle-tools")]
 const FFMPEG_VERSION_STAMP: &str = ".ffmpeg-version";
-
+/// Same staleness tracking for the embedded QuickJS runtime.
 #[cfg(feature = "bundle-tools")]
-fn embedded_ffmpeg_cli() -> Option<PathBuf> {
+const QJS_VERSION_STAMP: &str = ".qjs-version";
+
+/// Extract `bytes` to the managed dir under `name`, but only when the stamp file
+/// doesn't already record the running app's version — so an update that ships a
+/// newer binary replaces the managed copy, while an unchanged version reuses it
+/// instead of rewriting it every launch.
+#[cfg(feature = "bundle-tools")]
+fn extract_stamped(bytes: &[u8], name: &str, stamp_name: &str) -> Option<PathBuf> {
     let dir = managed_bin_dir()?;
-    let managed = dir.join(FFMPEG_EXE);
-    let stamp = dir.join(FFMPEG_VERSION_STAMP);
+    let managed = dir.join(name);
+    let stamp = dir.join(stamp_name);
     let is_stamp_current = std::fs::read_to_string(&stamp)
         .is_ok_and(|stamped| stamped.trim() == env!("CARGO_PKG_VERSION"));
     if is_stamp_current && managed.is_file() {
         return Some(managed);
     }
-    let extracted = extract_to_managed(BUNDLED_FFMPEG_CLI_BYTES, FFMPEG_EXE)?;
+    let extracted = extract_to_managed(bytes, name)?;
     let _ = std::fs::write(&stamp, env!("CARGO_PKG_VERSION"));
     Some(extracted)
 }
+
+#[cfg(feature = "bundle-tools")]
+fn embedded_ffmpeg_cli() -> Option<PathBuf> {
+    extract_stamped(BUNDLED_FFMPEG_CLI_BYTES, FFMPEG_EXE, FFMPEG_VERSION_STAMP)
+}
 #[cfg(not(feature = "bundle-tools"))]
 fn embedded_ffmpeg_cli() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(feature = "bundle-tools")]
+fn embedded_qjs() -> Option<PathBuf> {
+    extract_stamped(BUNDLED_QJS_BYTES, QJS_EXE, QJS_VERSION_STAMP)
+}
+#[cfg(not(feature = "bundle-tools"))]
+fn embedded_qjs() -> Option<PathBuf> {
     None
 }
 
@@ -123,14 +181,13 @@ fn embedded_ffmpeg_cli() -> Option<PathBuf> {
 /// Order: managed copy → bundled file (bin/ or next to exe) → PATH → embedded bytes.
 pub(crate) fn resolve_ytdlp() -> Option<PathBuf> {
     let managed = managed_bin_dir().map(|d| d.join(YTDLP_EXE));
-    if let Some(m) = &managed {
-        if m.is_file() {
-            return Some(m.clone());
-        }
+    if let Some(m) = &managed && m.is_file() {
+        return Some(m.clone());
     }
     if let Some(source) = bundled_binary(YTDLP_EXE).or_else(|| find_in_path(YTDLP_EXE)) {
         return match &managed {
             Some(m) if std::fs::copy(&source, m).is_ok() => {
+                launch_lock::await_launches_in_progress();
                 set_owner_only(m, 0o755);
                 Some(m.clone())
             }
@@ -146,6 +203,13 @@ pub(crate) fn resolve_ffmpeg() -> Option<PathBuf> {
     bundled_binary(FFMPEG_EXE)
         .or_else(|| find_in_path(FFMPEG_EXE))
         .or_else(embedded_ffmpeg_cli)
+}
+
+/// Resolve the bundled QuickJS runtime yt-dlp uses to solve YouTube's nsig/PO-token
+/// JS challenges, for `--js-runtimes quickjs:<path>`. Same resolution order as
+/// ffmpeg, and like ffmpeg it never self-updates so it needs no managed-copy seeding.
+pub(crate) fn resolve_qjs() -> Option<PathBuf> {
+    bundled_binary(QJS_EXE).or_else(|| find_in_path(QJS_EXE)).or_else(embedded_qjs)
 }
 
 /// Delete the managed tool binaries so the next launch re-seeds them. The paths

@@ -1,4 +1,5 @@
 use std::path::Path;
+use yt_dlp_clipper::launch_lock;
 
 /// The floppy-disk "save" icon (embedded at compile time).
 pub(crate) fn save_icon() -> egui::ImageSource<'static> {
@@ -258,10 +259,7 @@ pub(crate) fn attach_text_menu(
 pub(crate) fn reveal_in_file_manager(path: &Path) {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open")
-        .arg("-R")
-        .arg(&path)
-        .spawn();
+    let _ = launch_lock::spawn(std::process::Command::new("open").arg("-R").arg(&path));
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -271,14 +269,14 @@ pub(crate) fn reveal_in_file_manager(path: &Path) {
         // quote the whole token whenever the path contains a space, which
         // Explorer ignores in favor of its default folder.
         let native = path.to_string_lossy().replace('/', "\\");
-        let _ = std::process::Command::new("explorer")
-            .raw_arg(format!("/select,\"{native}\""))
-            .spawn();
+        let _ = launch_lock::spawn(
+            std::process::Command::new("explorer").raw_arg(format!("/select,\"{native}\"")),
+        );
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let dir = path.parent().unwrap_or(path.as_path());
-        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+        let _ = launch_lock::spawn(std::process::Command::new("xdg-open").arg(dir));
     }
 }
 

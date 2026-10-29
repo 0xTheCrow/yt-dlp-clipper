@@ -122,10 +122,9 @@ pub(crate) fn show(
                 ui.label(settings.effective_download_dir().display().to_string());
             });
             ui.horizontal(|ui| {
-                if ui.button("Choose folder…").clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        settings.download_dir = Some(folder);
-                    }
+                if ui.button("Choose folder…").clicked()
+                    && let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    settings.download_dir = Some(folder);
                 }
                 if ui.button("Use default cache").clicked() {
                     settings.download_dir = None;
@@ -152,10 +151,9 @@ pub(crate) fn show(
                 };
             });
             ui.horizontal(|ui| {
-                if ui.button("Choose folder…").clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        settings.output_dir = Some(folder);
-                    }
+                if ui.button("Choose folder…").clicked()
+                    && let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    settings.output_dir = Some(folder);
                 }
                 if ui.button("Clear").clicked() {
                     settings.output_dir = None;
@@ -252,17 +250,17 @@ pub(crate) fn show(
                         }
                     });
                 ui.label("OR");
-                if ui.button("Choose cookies file…").clicked() {
-                    if let Some(picked) = rfd::FileDialog::new().pick_file() {
-                        settings.cookies = Some(CookieSource::File(picked));
-                    }
+                if ui.button("Choose cookies file…").clicked()
+                    && let Some(picked) = rfd::FileDialog::new().pick_file() {
+                    settings.cookies = Some(CookieSource::File(picked));
                 }
             });
             if let Some(CookieSource::File(path)) = &settings.cookies {
                 ui.weak(path.display().to_string());
             }
             ui.small(
-                "Needed for age-restricted or members-only videos. \"From browser\" needs \
+                "Used only for videos that ask you to sign in, such as age-restricted or \
+                 members-only ones; other videos are fetched without them. \"From browser\" needs \
                  the browser closed if it reports the cookie database is locked; a cookies \
                  file (exported via a browser extension, e.g. \"Get cookies.txt\") works \
                  with the browser left open.",
@@ -282,6 +280,10 @@ pub(crate) fn show(
                     }
                 });
             });
+            ui.checkbox(
+                &mut settings.check_updates_automatically,
+                "Check for updates automatically",
+            );
             match &jobs.update_state {
                 UpdateState::Idle | UpdateState::Checking => {}
                 UpdateState::UpToDate => {

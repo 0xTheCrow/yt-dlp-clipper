@@ -26,7 +26,7 @@ pub(crate) fn is_video_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
-        .map_or(false, |e| EXTS.contains(&e.as_str()))
+        .is_some_and(|e| EXTS.contains(&e.as_str()))
 }
 
 /// Nearest-neighbour downscale to `max_w` wide, preserving aspect ratio.

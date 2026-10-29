@@ -86,10 +86,8 @@ impl Clip {
     }
 
     pub(crate) fn commit_gesture(&mut self) {
-        if let Some(range) = self.pending_undo_range.take() {
-            if range != self.range() {
-                self.push_undo(range);
-            }
+        if let Some(range) = self.pending_undo_range.take() && range != self.range() {
+            self.push_undo(range);
         }
     }
 

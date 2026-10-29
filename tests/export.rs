@@ -174,17 +174,41 @@ fn audio_only_mp3_reencodes_to_window() {
     assert!((dur - 2.0).abs() < 0.3, "audio duration {dur} not near 2.0");
 }
 
+fn packet_hashes(path: &Path, stream_selector: &str) -> Vec<String> {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", stream_selector, "-show_data_hash", "MD5"])
+        .args(["-show_entries", "packet=data_hash", "-of", "default=noprint_wrappers=1:nokey=1"])
+        .arg(path)
+        .output()
+        .expect("ffprobe must be installed to run these tests");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with("MD5:"))
+        .map(str::to_string)
+        .collect()
+}
+
 #[test]
 fn full_into_mkv_copies_streams() {
-    let out = run(Mode::Full, "export_full.mkv", 0.0, common::DURATION_SECS);
-    assert_eq!(codec_of(&out, "video"), "h264", "video should be copied");
-    assert_eq!(codec_of(&out, "audio"), "aac", "audio should be copied");
+    let source = common::h264_with_audio();
+    let out = run_from(source.clone(), Mode::Full, "export_full.mkv", 0.0, common::DURATION_SECS);
+    for stream_selector in ["v:0", "a:0"] {
+        let exported = packet_hashes(&out, stream_selector);
+        assert!(!exported.is_empty(), "stream {stream_selector} is missing from the export");
+        assert_eq!(
+            exported,
+            packet_hashes(&source, stream_selector),
+            "stream {stream_selector} was re-encoded instead of copied packet for packet"
+        );
+    }
 }
 
 #[test]
 fn full_transcodes_vp9_into_mp4() {
     // VP9 can't live in MP4 via copy, so Full must re-encode the video to H.264.
-    let out = run_from(common::vp9(), Mode::Full, "export_vp9_full.mp4", 0.0, common::DURATION_SECS);
+    let out = run_from(
+        common::vp9(), Mode::Full, "export_vp9_full.mp4", 0.0, common::DURATION_SECS,
+    );
     assert_eq!(codec_of(&out, "video"), "h264", "vp9 should be transcoded to h264");
 }
 
@@ -196,40 +220,52 @@ fn pix_fmt_of(path: &Path) -> String {
 #[test]
 fn compat_transcodes_av1_into_h264_in_mp4() {
     // AV1 fits MP4 but won't play on most phones, so compatibility mode re-encodes.
-    let out = run_from_compat(av1_in_mp4(), Mode::Full, "export_av1_compat.mp4", 0.0, common::DURATION_SECS, true);
+    let out = run_from_compat(
+        av1_in_mp4(), Mode::Full, "export_av1_compat.mp4", 0.0, common::DURATION_SECS, true,
+    );
     assert_eq!(codec_of(&out, "video"), "h264", "av1 should be transcoded to h264");
 }
 
 #[test]
 fn noncompat_copies_av1_into_mp4() {
-    let out = run_from_compat(av1_in_mp4(), Mode::Full, "export_av1_raw.mp4", 0.0, common::DURATION_SECS, false);
+    let out = run_from_compat(
+        av1_in_mp4(), Mode::Full, "export_av1_raw.mp4", 0.0, common::DURATION_SECS, false,
+    );
     assert_eq!(codec_of(&out, "video"), "av1", "av1 should be copied unchanged");
 }
 
 #[test]
 fn compat_reencodes_10bit_h264_to_8bit() {
     // 10-bit H.264 fits MP4 by codec but not by pixel format on mobile hardware.
-    let out = run_from_compat(h264_10bit(), Mode::Full, "export_10bit_compat.mp4", 0.0, common::DURATION_SECS, true);
+    let out = run_from_compat(
+        h264_10bit(), Mode::Full, "export_10bit_compat.mp4", 0.0, common::DURATION_SECS, true,
+    );
     assert_eq!(codec_of(&out, "video"), "h264");
     assert_eq!(pix_fmt_of(&out), "yuv420p", "10-bit should be re-encoded to 8-bit");
 }
 
 #[test]
 fn noncompat_copies_10bit_h264() {
-    let out = run_from_compat(h264_10bit(), Mode::Full, "export_10bit_raw.mp4", 0.0, common::DURATION_SECS, false);
+    let out = run_from_compat(
+        h264_10bit(), Mode::Full, "export_10bit_raw.mp4", 0.0, common::DURATION_SECS, false,
+    );
     assert_eq!(pix_fmt_of(&out), "yuv420p10le", "10-bit should be preserved");
 }
 
 #[test]
 fn compat_reencodes_ac3_audio_to_aac() {
     // AC-3 fits MP4 by copy but doesn't decode on iOS, so compatibility re-encodes.
-    let out = run_from_compat(h264_with_ac3(), Mode::Full, "export_ac3_compat.mp4", 0.0, common::DURATION_SECS, true);
+    let out = run_from_compat(
+        h264_with_ac3(), Mode::Full, "export_ac3_compat.mp4", 0.0, common::DURATION_SECS, true,
+    );
     assert_eq!(codec_of(&out, "audio"), "aac", "ac3 should be transcoded to aac");
 }
 
 #[test]
 fn noncompat_copies_ac3_into_mp4() {
-    let out = run_from_compat(h264_with_ac3(), Mode::Full, "export_ac3_raw.mp4", 0.0, common::DURATION_SECS, false);
+    let out = run_from_compat(
+        h264_with_ac3(), Mode::Full, "export_ac3_raw.mp4", 0.0, common::DURATION_SECS, false,
+    );
     assert_eq!(codec_of(&out, "audio"), "ac3", "ac3 should be copied unchanged");
 }
 
@@ -305,16 +341,17 @@ fn run_scaled(mode: Mode, out_name: &str, height: u32) -> (u32, u32) {
 
 #[test]
 fn clip_downscales_to_target_height() {
-    // Fixture is 320x240; 120 lines keeps the 4:3 aspect at 160x120.
-    let (w, h) = run_scaled(Mode::Clip, "scaled_clip.mp4", 120);
-    assert_eq!((w, h), (160, 120), "clip should downscale to 160x120");
+    let half_size = (common::WIDTH / 2, common::HEIGHT / 2);
+    let (w, h) = run_scaled(Mode::Clip, "scaled_clip.mp4", half_size.1);
+    assert_eq!((w, h), half_size, "clip should downscale to half size, keeping the aspect");
 }
 
 #[test]
 fn full_downscale_reencodes_from_copyable_source() {
     // h264-in-mp4 would normally remux-copy; a downscale forces a re-encode.
-    let (w, h) = run_scaled(Mode::Full, "scaled_full.mp4", 120);
-    assert_eq!((w, h), (160, 120), "full should downscale to 160x120");
+    let half_size = (common::WIDTH / 2, common::HEIGHT / 2);
+    let (w, h) = run_scaled(Mode::Full, "scaled_full.mp4", half_size.1);
+    assert_eq!((w, h), half_size, "full should downscale to half size, keeping the aspect");
 }
 
 /// Export `input` over a zero-length range, returning the result unwrapped.

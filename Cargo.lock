@@ -5109,7 +5109,7 @@ dependencies = [
 
 [[package]]
 name = "yt-dlp-clipper"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5119,6 +5119,7 @@ dependencies = [
  "egui_extras",
  "ffmpeg-the-third",
  "rfd",
+ "ring",
  "serde",
  "serde_json",
  "ureq",

@@ -99,6 +99,10 @@ pub(crate) struct UiState {
     /// held key may next fire; `0.0` means "not held" so the next press fires now.
     pub(crate) nav_repeat_at: [f64; 4],
     pub(crate) cache: CacheBrowser,
+    /// "Later" on the update banner, for this run only — deliberately not
+    /// persisted, so the next launch checks again and shows it once more if
+    /// the release is still available.
+    pub(crate) update_banner_dismissed: bool,
 }
 
 impl Default for UiState {
@@ -109,6 +113,7 @@ impl Default for UiState {
             rebinding: None,
             nav_repeat_at: [0.0; 4],
             cache: CacheBrowser::default(),
+            update_banner_dismissed: false,
         }
     }
 }

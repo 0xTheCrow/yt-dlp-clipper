@@ -5,6 +5,7 @@ fn main() {
         let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
         embed("BUNDLE_YTDLP", "BUNDLED_YTDLP_PATH", "bundled-ytdlp", &out);
         embed("BUNDLE_FFMPEG_CLI", "BUNDLED_FFMPEG_CLI_PATH", "bundled-ffmpeg-cli", &out);
+        embed("BUNDLE_QJS", "BUNDLED_QJS_PATH", "bundled-qjs", &out);
         link_media_foundation();
         link_dav1d();
     }

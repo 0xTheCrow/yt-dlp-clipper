@@ -15,9 +15,9 @@ pub(crate) struct Playback {
     /// the egui time and video position captured when playback started.
     pub(crate) play_start_wall: f64,
     pub(crate) play_start_pos: f64,
-    /// After releasing a timeline drag: `(gen, position)` of the seek we're
-    /// waiting to land on. The playhead stays here and earlier decodes are
-    /// dropped until the frame with this gen arrives.
+    /// After releasing a timeline drag: `(generation, position)` of the seek
+    /// we're waiting to land on. The playhead stays here and earlier decodes
+    /// are dropped until the frame with this generation arrives.
     pub(crate) awaiting_release: Option<(u64, f64)>,
 }
 

@@ -185,19 +185,15 @@ pub(crate) fn timeline(
             ],
         )
     };
-    if response.drag_started() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            let grabbed = grabbed_marker(pos.x);
-            clip.timeline_drag = Some(grabbed.unwrap_or(TimelineDrag::Playhead));
-            if grabbed.is_some() {
-                clip.begin_gesture();
-            }
+    if response.drag_started() && let Some(pos) = response.interact_pointer_pos() {
+        let grabbed = grabbed_marker(pos.x);
+        clip.timeline_drag = Some(grabbed.unwrap_or(TimelineDrag::Playhead));
+        if grabbed.is_some() {
+            clip.begin_gesture();
         }
     }
-    if let Some(pos) = response.hover_pos() {
-        if grabbed_marker(pos.x).is_some() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        }
+    if let Some(pos) = response.hover_pos() && grabbed_marker(pos.x).is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
 
     let mut result = None;
@@ -213,12 +209,11 @@ pub(crate) fn timeline(
                 TimelineDrag::Playhead => {}
             }
         }
-    } else if response.dragged() || response.clicked() || response.drag_stopped() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            let t = axis.secs_at(pos.x);
-            live_pos = Some(t);
-            result = Some((t, response.drag_stopped() || response.clicked()));
-        }
+    } else if (response.dragged() || response.clicked() || response.drag_stopped())
+        && let Some(pos) = response.interact_pointer_pos() {
+        let t = axis.secs_at(pos.x);
+        live_pos = Some(t);
+        result = Some((t, response.drag_stopped() || response.clicked()));
     }
     if response.drag_stopped() {
         clip.commit_gesture();
@@ -271,4 +266,222 @@ pub(crate) fn timeline(
         );
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::clip::ClipRange;
+
+    const DURATION_SECS: f64 = 100.0;
+    const SCREEN_WIDTH: f32 = 1000.0;
+    const SCREEN_HEIGHT: f32 = 200.0;
+    const FRAME_SECS: f64 = 1.0 / 60.0;
+    const DRAG_STEP_PIXELS: f32 = 8.0;
+    const SCROLL_SETTLE_FRAMES: usize = 60;
+    const SECS_PER_PIXEL: f64 = DURATION_SECS / SCREEN_WIDTH as f64;
+
+    struct TimelineHarness {
+        context: egui::Context,
+        clip: Clip,
+        playback: Playback,
+        time_secs: f64,
+        seeks: Vec<(f64, bool)>,
+    }
+
+    impl TimelineHarness {
+        fn new(in_secs: f64, out_secs: f64, view_start_secs: f64, view_end_secs: f64) -> Self {
+            let mut clip = Clip::default();
+            clip.restore(ClipRange { in_secs, out_secs, view_start_secs, view_end_secs });
+            let mut harness = Self {
+                context: egui::Context::default(),
+                clip,
+                playback: Playback::default(),
+                time_secs: 0.0,
+                seeks: Vec::new(),
+            };
+            harness.run_frame(Vec::new());
+            harness
+        }
+
+        fn run_frame(&mut self, events: Vec<egui::Event>) {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(SCREEN_WIDTH, SCREEN_HEIGHT),
+                )),
+                time: Some(self.time_secs),
+                events,
+                ..Default::default()
+            };
+            let Self { context, clip, playback, seeks, .. } = self;
+            let _ = context.run(input, |context| {
+                egui::CentralPanel::default().frame(egui::Frame::none()).show(context, |ui| {
+                    if let Some(seek) = timeline(ui, clip, playback, 0.0, DURATION_SECS) {
+                        seeks.push(seek);
+                    }
+                });
+            });
+            self.time_secs += FRAME_SECS;
+        }
+
+        fn x_at(&self, secs: f64) -> f32 {
+            let rect = egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(SCREEN_WIDTH, TIMELINE_HEIGHT),
+            );
+            TimeAxis::new(rect, self.clip.view_start_secs, self.clip.view_end_secs).x_at(secs)
+        }
+
+        fn drag_through(&mut self, waypoints: &[f32]) {
+            let (&first_x, rest) = waypoints.split_first().expect("a drag needs a start point");
+            self.run_frame(vec![egui::Event::PointerMoved(pointer_at(first_x))]);
+            self.run_frame(vec![primary_button(first_x, true)]);
+            let mut x = first_x;
+            for &target_x in rest {
+                while (target_x - x).abs() > DRAG_STEP_PIXELS {
+                    x += (target_x - x).signum() * DRAG_STEP_PIXELS;
+                    self.run_frame(vec![egui::Event::PointerMoved(pointer_at(x))]);
+                }
+                x = target_x;
+                self.run_frame(vec![egui::Event::PointerMoved(pointer_at(x))]);
+            }
+            self.run_frame(vec![primary_button(x, false)]);
+            self.run_frame(Vec::new());
+        }
+
+        fn click(&mut self, x: f32) {
+            self.run_frame(vec![egui::Event::PointerMoved(pointer_at(x))]);
+            self.run_frame(vec![primary_button(x, true)]);
+            self.run_frame(vec![primary_button(x, false)]);
+            self.run_frame(Vec::new());
+        }
+
+        fn scroll(&mut self, x: f32, delta_y: f32) {
+            self.run_frame(vec![
+                egui::Event::PointerMoved(pointer_at(x)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, delta_y),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            for _ in 0..SCROLL_SETTLE_FRAMES {
+                self.run_frame(Vec::new());
+            }
+        }
+    }
+
+    fn pointer_at(x: f32) -> egui::Pos2 {
+        egui::pos2(x, TIMELINE_HEIGHT / 2.0)
+    }
+
+    fn primary_button(x: f32, is_pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: pointer_at(x),
+            button: egui::PointerButton::Primary,
+            pressed: is_pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn assert_near(actual: f64, expected: f64, tolerance: f64) {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "{actual} is not within {tolerance} of {expected}"
+        );
+    }
+
+    #[test]
+    fn dragging_the_in_marker_moves_it_as_one_undo_step() {
+        let mut harness = TimelineHarness::new(25.0, 75.0, 0.0, DURATION_SECS);
+        harness.drag_through(&[harness.x_at(25.0), harness.x_at(50.0)]);
+        assert_near(harness.clip.in_secs, 50.0, SECS_PER_PIXEL);
+        assert_eq!(harness.clip.out_secs, 75.0);
+        assert!(harness.seeks.is_empty(), "a marker drag must not seek: {:?}", harness.seeks);
+        harness.clip.undo();
+        assert_eq!(harness.clip.in_secs, 25.0, "one undo must restore the pre-drag point");
+    }
+
+    #[test]
+    fn the_in_marker_stops_short_of_the_out_marker() {
+        let mut harness = TimelineHarness::new(25.0, 75.0, 0.0, DURATION_SECS);
+        harness.drag_through(&[harness.x_at(25.0), harness.x_at(95.0)]);
+        assert_eq!(harness.clip.in_secs, 75.0 - MIN_RANGE_SECS);
+    }
+
+    #[test]
+    fn the_out_marker_stops_short_of_the_in_marker() {
+        let mut harness = TimelineHarness::new(25.0, 75.0, 0.0, DURATION_SECS);
+        harness.drag_through(&[harness.x_at(75.0), harness.x_at(5.0)]);
+        assert_eq!(harness.clip.out_secs, 25.0 + MIN_RANGE_SECS);
+    }
+
+    #[test]
+    fn a_drag_back_to_its_start_records_nothing_and_keeps_redo() {
+        let mut harness = TimelineHarness::new(25.0, 75.0, 0.0, DURATION_SECS);
+        harness.clip.set_in_secs(30.0);
+        harness.clip.undo();
+        let start_x = harness.x_at(25.0);
+        harness.drag_through(&[start_x, harness.x_at(50.0), start_x]);
+        assert_eq!(harness.clip.in_secs, 25.0);
+        harness.clip.redo();
+        assert_eq!(harness.clip.in_secs, 30.0, "the round trip must not clear the redo step");
+    }
+
+    #[test]
+    fn clicking_away_from_the_markers_seeks_there() {
+        let mut harness = TimelineHarness::new(25.0, 75.0, 0.0, DURATION_SECS);
+        harness.click(harness.x_at(50.0));
+        assert_eq!(harness.seeks.len(), 1, "one click, one seek: {:?}", harness.seeks);
+        let (target_secs, is_released) = harness.seeks[0];
+        assert_near(target_secs, 50.0, SECS_PER_PIXEL);
+        assert!(is_released);
+        assert_eq!((harness.clip.in_secs, harness.clip.out_secs), (25.0, 75.0));
+    }
+
+    #[test]
+    fn scrubbing_reports_live_positions_then_the_release() {
+        let mut harness = TimelineHarness::new(25.0, 75.0, 0.0, DURATION_SECS);
+        harness.drag_through(&[harness.x_at(40.0), harness.x_at(60.0)]);
+        let (last, live) = harness.seeks.split_last().expect("a scrub must seek");
+        assert!(!live.is_empty(), "a scrub must seek while dragging, not only on release");
+        assert!(live.iter().all(|&(_, is_released)| !is_released), "{live:?}");
+        assert_near(last.0, 60.0, SECS_PER_PIXEL);
+        assert!(last.1, "the final seek must be marked as released");
+        assert_eq!((harness.clip.in_secs, harness.clip.out_secs), (25.0, 75.0));
+    }
+
+    #[test]
+    fn a_marker_outside_the_zoom_window_cannot_be_grabbed() {
+        let mut harness = TimelineHarness::new(20.0, 80.0, 50.0, DURATION_SECS);
+        let left_edge_x = harness.x_at(harness.clip.view_start_secs);
+        harness.drag_through(&[left_edge_x + 1.0, harness.x_at(65.0)]);
+        assert_eq!(harness.clip.in_secs, 20.0, "the hidden in marker moved");
+        assert!(!harness.seeks.is_empty(), "the drag should have scrubbed the playhead instead");
+    }
+
+    #[test]
+    fn scrolling_in_zooms_about_the_cursor() {
+        let mut harness = TimelineHarness::new(25.0, 75.0, 0.0, DURATION_SECS);
+        let cursor_x = harness.x_at(25.0);
+        harness.scroll(cursor_x, 200.0);
+        let span_secs = harness.clip.view_end_secs - harness.clip.view_start_secs;
+        assert!(span_secs < DURATION_SECS, "scrolling in did not zoom: span {span_secs}");
+        let rect = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(SCREEN_WIDTH, TIMELINE_HEIGHT),
+        );
+        let axis = TimeAxis::new(rect, harness.clip.view_start_secs, harness.clip.view_end_secs);
+        assert_near(axis.secs_at(cursor_x), 25.0, SECS_PER_PIXEL);
+        assert_eq!((harness.clip.in_secs, harness.clip.out_secs), (25.0, 75.0));
+    }
+
+    #[test]
+    fn scrolling_out_stops_at_the_whole_video() {
+        let mut harness = TimelineHarness::new(25.0, 75.0, 40.0, 60.0);
+        harness.scroll(harness.x_at(50.0), -5000.0);
+        assert_eq!(harness.clip.view_start_secs, 0.0);
+        assert_eq!(harness.clip.view_end_secs, DURATION_SECS);
+    }
 }

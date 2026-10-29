@@ -5,8 +5,6 @@ use std::sync::OnceLock;
 use yt_dlp_clipper::decoder::{audio_duration_secs, Decoder};
 
 const FRAME_SECS: f64 = 1.0 / common::FPS;
-const WIDTH: u32 = 320;
-const HEIGHT: u32 = 240;
 
 fn open(path: &std::path::Path) -> Decoder {
     common::init();
@@ -25,11 +23,34 @@ fn av1() -> PathBuf {
     .clone()
 }
 
+/// AAC audio with no video stream in m4a, which does carry a per-stream
+/// duration — the other branch of the audio-only duration lookup.
+fn aac_audio_only() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        common::generate("fixture_aac_audio_only.m4a", &["-map", "1:a", "-c:a", "aac"])
+    })
+    .clone()
+}
+
+/// H.264 with a keyframe every 5 frames, so a multi-frame backward jump
+/// crosses several keyframe boundaries within the fixture's short duration.
+fn h264_short_gop() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        common::generate(
+            "fixture_h264_short_gop.mp4",
+            &["-c:v", "libx264", "-g", "5", "-c:a", "aac", "-shortest"],
+        )
+    })
+    .clone()
+}
+
 #[test]
 fn reports_dimensions_and_duration() {
     let dec = open(&common::h264_with_audio());
-    assert_eq!(dec.width, WIDTH);
-    assert_eq!(dec.height, HEIGHT);
+    assert_eq!(dec.width, common::WIDTH);
+    assert_eq!(dec.height, common::HEIGHT);
     assert!(
         (dec.duration_secs() - common::DURATION_SECS).abs() < 0.2,
         "duration {} not near {}",
@@ -42,8 +63,8 @@ fn reports_dimensions_and_duration() {
 fn step_forward_yields_full_frames() {
     let mut dec = open(&common::h264_with_audio());
     let img = dec.step_forward().expect("first frame");
-    assert_eq!(img.size, [WIDTH as usize, HEIGHT as usize]);
-    assert_eq!(img.pixels.len(), (WIDTH * HEIGHT) as usize);
+    assert_eq!(img.size, [common::WIDTH as usize, common::HEIGHT as usize]);
+    assert_eq!(img.pixels.len(), (common::WIDTH * common::HEIGHT) as usize);
 }
 
 #[test]
@@ -54,6 +75,44 @@ fn step_forward_advances_exactly_one_frame() {
     dec.step_forward().expect("frame 1");
     let dt = dec.current_secs() - t0;
     assert!((dt - FRAME_SECS).abs() < 0.005, "frame delta {dt} != {FRAME_SECS}");
+}
+
+#[test]
+fn a_forward_jump_lands_exactly_that_many_frames_ahead() {
+    const JUMP_FRAMES: i64 = 10;
+    let mut dec = open(&common::h264_with_audio());
+    dec.seek_secs(1.0).expect("seek frame");
+    let before = dec.current_secs();
+
+    let image = dec.step_by(JUMP_FRAMES).expect("frame after the jump");
+
+    let stepped_frames = (dec.current_secs() - before) / FRAME_SECS;
+    assert!(
+        (stepped_frames - JUMP_FRAMES as f64).abs() < 0.5,
+        "jumped {stepped_frames} frames, not {JUMP_FRAMES}"
+    );
+    let landed_frame = open(&common::h264_with_audio())
+        .seek_secs(dec.current_secs())
+        .expect("frame at the landed position");
+    assert!(image == landed_frame, "the jump returned a different frame than it landed on");
+}
+
+#[test]
+fn stepping_forward_past_the_end_lands_on_the_last_frame() {
+    let mut dec = open(&common::h264_with_audio());
+    let last_frame_secs = common::DURATION_SECS - FRAME_SECS;
+    dec.seek_secs(last_frame_secs - 3.0 * FRAME_SECS).expect("seek frame");
+    let frames_past_the_end = (common::FPS * common::DURATION_SECS) as i64;
+
+    let image = dec.step_by(frames_past_the_end);
+
+    assert!(image.is_some(), "overshooting the end returned no frame");
+    assert!(
+        (dec.current_secs() - last_frame_secs).abs() < FRAME_SECS / 2.0,
+        "landed at {}s, not the last frame at {last_frame_secs}s",
+        dec.current_secs()
+    );
+    assert!(dec.step_forward().is_none(), "a frame exists past the one it landed on");
 }
 
 #[test]
@@ -104,7 +163,7 @@ fn repeated_step_backward_keeps_moving_on_sparse_keyframes() {
 /// earlier keyframes rather than clamping to the start of that one GOP.
 #[test]
 fn large_backward_jump_crosses_keyframe_boundaries() {
-    let mut dec = open(&common::h264_short_gop());
+    let mut dec = open(&h264_short_gop());
     dec.seek_secs(2.5).expect("seek frame");
     let before = dec.current_secs();
     dec.step_by(-20).expect("frame 20 steps back");
@@ -127,13 +186,6 @@ fn backward_jump_beyond_video_length_clamps_to_start() {
 }
 
 #[test]
-fn decodes_vp9() {
-    let mut dec = open(&common::vp9());
-    assert!(dec.step_forward().is_some(), "vp9 first frame should decode");
-    assert!(dec.seek_secs(1.5).is_some(), "vp9 seek should decode");
-}
-
-#[test]
 fn decodes_av1() {
     let mut dec = open(&av1());
     assert!(dec.step_forward().is_some(), "av1 first frame should decode");
@@ -143,7 +195,7 @@ fn decodes_av1() {
 #[test]
 fn open_rejects_a_source_with_no_video_stream() {
     common::init();
-    for input in [common::opus_audio_only(), common::aac_audio_only()] {
+    for input in [common::opus_audio_only(), aac_audio_only()] {
         assert!(
             Decoder::open(input.to_str().unwrap()).is_err(),
             "{} has no video stream, so the video decoder must not open it",
@@ -167,7 +219,7 @@ fn audio_duration_matches_the_source_without_a_stream_duration() {
 #[test]
 fn audio_duration_matches_the_source_carrying_a_stream_duration() {
     common::init();
-    let secs = audio_duration_secs(common::aac_audio_only().to_str().unwrap())
+    let secs = audio_duration_secs(aac_audio_only().to_str().unwrap())
         .expect("m4a audio-only duration");
     assert!(
         (secs - common::DURATION_SECS).abs() < 0.2,

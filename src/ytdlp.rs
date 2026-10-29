@@ -1,5 +1,6 @@
 //! Thin wrapper around the `yt-dlp` binary (spawned as a subprocess).
 
+use crate::launch_lock;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read};
@@ -15,6 +16,10 @@ static YTDLP_BIN: OnceLock<PathBuf> = OnceLock::new();
 /// Absolute path to the ffmpeg binary yt-dlp merges with, passed via
 /// `--ffmpeg-location` so yt-dlp doesn't search PATH/CWD for one of its own.
 static FFMPEG_BIN: OnceLock<PathBuf> = OnceLock::new();
+/// Absolute path to the bundled QuickJS runtime, passed via `--js-runtimes` so
+/// yt-dlp can solve YouTube's nsig/PO-token JS challenge without relying on an
+/// external `deno`/`node` install.
+static QJS_BIN: OnceLock<PathBuf> = OnceLock::new();
 
 /// Point every yt-dlp invocation at this exact binary. Call once at startup.
 pub fn set_binary(path: PathBuf) {
@@ -24,6 +29,12 @@ pub fn set_binary(path: PathBuf) {
 /// Tell yt-dlp which ffmpeg to merge with. Call once at startup.
 pub fn set_ffmpeg(path: PathBuf) {
     let _ = FFMPEG_BIN.set(path);
+}
+
+/// Tell yt-dlp which JS runtime to use for its nsig/PO-token solver. Call once
+/// at startup.
+pub fn set_js_runtime(path: PathBuf) {
+    let _ = QJS_BIN.set(path);
 }
 
 /// The resolved yt-dlp path, falling back to the bare name when unset (dev/test
@@ -118,11 +129,11 @@ pub struct Format {
 
 impl Format {
     pub fn has_video(&self) -> bool {
-        self.vcodec.as_deref().map_or(false, |c| c != "none")
+        self.vcodec.as_deref().is_some_and(|c| c != "none")
     }
 
     pub fn has_audio(&self) -> bool {
-        self.acodec.as_deref().map_or(false, |c| c != "none")
+        self.acodec.as_deref().is_some_and(|c| c != "none")
     }
 
     /// Exact size if known, otherwise yt-dlp's approximate estimate.
@@ -159,7 +170,7 @@ fn best_video(formats: &[Format], max_height: Option<u32>) -> Option<&Format> {
     formats
         .iter()
         .filter(|f| f.has_video())
-        .filter(|f| max_height.map_or(true, |th| f.height.map_or(false, |h| h <= th)))
+        .filter(|f| max_height.is_none_or(|th| f.height.is_some_and(|h| h <= th)))
         .max_by_key(|f| f.height.unwrap_or(0))
 }
 
@@ -221,17 +232,13 @@ pub fn estimated_size(
 ) -> Option<u64> {
     let mut total = 0;
     let mut known = false;
-    if want_video {
-        if let Some(bytes) = best_video(&info.formats, height).and_then(Format::size) {
-            total += bytes;
-            known = true;
-        }
+    if want_video && let Some(bytes) = best_video(&info.formats, height).and_then(Format::size) {
+        total += bytes;
+        known = true;
     }
-    if want_audio {
-        if let Some(bytes) = best_audio(&info.formats).and_then(Format::size) {
-            total += bytes;
-            known = true;
-        }
+    if want_audio && let Some(bytes) = best_audio(&info.formats).and_then(Format::size) {
+        total += bytes;
+        known = true;
     }
     known.then_some(total)
 }
@@ -257,9 +264,7 @@ pub fn suggests_cookies(text: &str) -> bool {
 
 /// The installed yt-dlp's version string (`yt-dlp --version`), trimmed.
 pub fn version() -> Result<String> {
-    let output = Command::new(binary())
-        .arg("--version")
-        .output()
+    let output = launch_lock::output(Command::new(binary()).arg("--version"))
         .context("failed to run yt-dlp — is it installed and on PATH?")?;
     if !output.status.success() {
         bail!("yt-dlp --version failed: {}", String::from_utf8_lossy(&output.stderr));
@@ -270,9 +275,7 @@ pub fn version() -> Result<String> {
 /// Self-update via `yt-dlp -U`, returning yt-dlp's report. `-U` is a no-op when
 /// already current, so the click itself doubles as the up-to-date check.
 pub fn update() -> Result<String> {
-    let output = Command::new(binary())
-        .arg("-U")
-        .output()
+    let output = launch_lock::output(Command::new(binary()).arg("-U"))
         .context("failed to run yt-dlp — is it installed and on PATH?")?;
     let report = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !output.status.success() {
@@ -302,6 +305,20 @@ fn push_cookie_args<'a>(
     }
 }
 
+/// Appends `--js-runtimes quickjs:<path>` when a bundled QuickJS binary was
+/// resolved at startup, so the `web` client's nsig/PO-token challenge can be
+/// solved without an external `deno`/`node` install. This *adds* quickjs
+/// alongside yt-dlp's default `deno` detection rather than replacing it, so a
+/// machine that already has deno on PATH keeps using it (higher priority).
+/// `arg` holds the owned "quickjs:<path>" string `args` borrows from, so it
+/// must outlive `args`.
+fn push_js_runtime_args<'a>(args: &mut Vec<&'a str>, arg: &'a mut String) {
+    if let Some(path) = QJS_BIN.get() {
+        *arg = format!("quickjs:{}", path.to_string_lossy());
+        args.extend(["--js-runtimes", arg.as_str()]);
+    }
+}
+
 /// Fetch metadata (`yt-dlp -J <url>`) without downloading anything. `cookies`
 /// authenticates the request (browser session or a `cookies.txt`), needed for
 /// age-gated or members-only videos.
@@ -309,12 +326,12 @@ pub fn fetch_info(url: &str, cookies: Option<&CookieSource>) -> Result<VideoInfo
     let mut args = vec!["-J", "--no-playlist"];
     let mut cookie_file_path = String::new();
     push_cookie_args(&mut args, cookies, &mut cookie_file_path);
+    let mut js_runtime_arg = String::new();
+    push_js_runtime_args(&mut args, &mut js_runtime_arg);
     // `--` ends option parsing so a URL starting with `-` can't be taken as a
     // yt-dlp flag (e.g. `--exec`, `--config-location`).
     args.extend(["--", url]);
-    let output = Command::new(binary())
-        .args(&args)
-        .output()
+    let output = launch_lock::output(Command::new(binary()).args(&args))
         .context("failed to run yt-dlp — is it installed and on PATH?")?;
 
     if !output.status.success() {
@@ -328,6 +345,34 @@ pub fn fetch_info(url: &str, cookies: Option<&CookieSource>) -> Result<VideoInfo
     let info: VideoInfo =
         serde_json::from_slice(&output.stdout).context("could not parse yt-dlp JSON output")?;
     Ok(info)
+}
+
+/// A fetched video and the cookies its fetch needed: `None` for a video that
+/// fetched without signing in.
+pub struct FetchedVideo {
+    pub info: VideoInfo,
+    pub sign_in_cookies: Option<CookieSource>,
+}
+
+/// `fetch_info` without cookies, retrying with `cookies` only when yt-dlp says
+/// the video needs sign-in. Cookies move yt-dlp onto YouTube clients that a
+/// public video doesn't need and that fail more often, so they're sent only
+/// when signing in is the alternative to failing.
+pub fn fetch_info_signing_in_if_needed(
+    url: &str,
+    cookies: Option<&CookieSource>,
+) -> Result<FetchedVideo> {
+    let error = match fetch_info(url, None) {
+        Ok(info) => return Ok(FetchedVideo { info, sign_in_cookies: None }),
+        Err(error) => error,
+    };
+    match cookies {
+        Some(cookies) if suggests_cookies(&error.to_string()) => Ok(FetchedVideo {
+            info: fetch_info(url, Some(cookies))?,
+            sign_in_cookies: Some(cookies.clone()),
+        }),
+        _ => Err(error),
+    }
 }
 
 /// Download into `dir`, returning the produced file path. A `selector` of
@@ -362,6 +407,8 @@ pub fn download(
     }
     let mut cookie_file_path = String::new();
     push_cookie_args(&mut args, cookies, &mut cookie_file_path);
+    let mut js_runtime_arg = String::new();
+    push_js_runtime_args(&mut args, &mut js_runtime_arg);
     // Pin the ffmpeg used for the video+audio merge to our resolved binary, so
     // yt-dlp can't pick up a planted `ffmpeg` from PATH/CWD.
     let ffmpeg_loc = FFMPEG_BIN.get().map(|p| p.to_string_lossy().into_owned());
@@ -381,11 +428,9 @@ pub fn download(
         url,
     ]);
 
-    let mut child = Command::new(binary())
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut child = launch_lock::spawn(
+        Command::new(binary()).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()),
+    )
         .context("failed to run yt-dlp — is it installed and on PATH?")?;
 
     let stdout = child.stdout.take().expect("piped stdout");
@@ -399,14 +444,11 @@ pub fn download(
         let line = line.unwrap_or_default();
         if let Some(rest) = line.strip_prefix("PROGRESS ") {
             let fields: Vec<&str> = rest.split_whitespace().collect();
-            if let [downloaded, total, estimate] = fields[..] {
-                if let Ok(done) = downloaded.parse::<u64>() {
-                    let total = total.parse::<u64>().or_else(|_| estimate.parse::<u64>());
-                    if let Ok(total) = total {
-                        if total > 0 {
-                            on_progress(done, total);
-                        }
-                    }
+            if let [downloaded, total, estimate] = fields[..]
+                && let Ok(done) = downloaded.parse::<u64>() {
+                let total = total.parse::<u64>().or_else(|_| estimate.parse::<u64>());
+                if let Ok(total) = total && total > 0 {
+                    on_progress(done, total);
                 }
             }
         } else if let Some(path) = line.strip_prefix("OUTPUT ") {

@@ -6,6 +6,7 @@ pub(crate) mod settings_window;
 pub(crate) mod time_axis;
 pub(crate) mod timeline;
 pub(crate) mod toolbar;
+pub(crate) mod update_banner;
 
 /// Vertical breathing room between the stacked rows of a control panel.
 pub(crate) const CONTROL_PAD: f32 = 6.0;

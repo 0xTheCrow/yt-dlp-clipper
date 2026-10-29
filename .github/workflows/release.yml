@@ -28,7 +28,7 @@ jobs:
   linux:
     runs-on: ubuntu-22.04  # older glibc => AppImage runs on a wider range of desktops
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Derive version from tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -47,10 +47,12 @@ jobs:
       - name: Build Linux AppImage
         run: ./scripts/make-appimage.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: linux
-          path: yt-dlp-clipper-*-x86_64.AppImage
+          # Version-less by design (see make-appimage.sh) so self-update can
+          # replace this file's contents in place without its name going stale.
+          path: cooper-clipper-x86_64.AppImage
 
   windows:
     # One self-contained .exe: FFmpeg, the codecs, and the C runtime are all linked
@@ -74,7 +76,7 @@ jobs:
       # Private vcpkg root the manifest installs into; VCPKG_ROOT for the cargo build.
       FF_VCPKG_ROOT: C:\ff
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Derive version from tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -89,7 +91,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Cache vcpkg packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}\vcpkg-cache
           key: vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
@@ -114,8 +116,10 @@ jobs:
           New-Item -ItemType File -Force -Path "$env:FF_VCPKG_ROOT\.vcpkg-root" | Out-Null
 
       # The bundle-tools feature bakes these into the exe and extracts them on first
-      # run: yt-dlp, and the ffmpeg CLI yt-dlp calls to merge streams (a runtime
-      # tool, separate from the libav* linked above).
+      # run: yt-dlp, the ffmpeg CLI yt-dlp calls to merge streams (a runtime tool,
+      # separate from the libav* linked above), and qjs — the JS runtime yt-dlp
+      # needs to solve YouTube's nsig/PO-token challenge for its `web` client (the
+      # only client that honors cookies for age-restricted videos).
       - name: Download embedded tool binaries
         shell: pwsh
         run: |
@@ -123,6 +127,9 @@ jobs:
           Invoke-WebRequest -UseBasicParsing `
             -Uri https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe `
             -OutFile build\windows\yt-dlp.exe
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-windows-x86_64.exe `
+            -OutFile build\windows\qjs.exe
           Invoke-WebRequest -UseBasicParsing `
             -Uri https://github.com/GyanD/codexffmpeg/releases/download/6.0/ffmpeg-6.0-full_build.7z `
             -OutFile build\windows\ffmpeg.7z
@@ -141,23 +148,24 @@ jobs:
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
           BUNDLE_YTDLP: ${{ github.workspace }}\build\windows\yt-dlp.exe
           BUNDLE_FFMPEG_CLI: ${{ github.workspace }}\build\windows\ffmpeg.exe
+          BUNDLE_QJS: ${{ github.workspace }}\build\windows\qjs.exe
         run: cargo build --release --features bundle-tools
 
       - name: Stage release exe
         shell: bash
         run: |
           VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
-          cp target/release/yt-dlp-clipper.exe "yt-dlp-clipper-${VERSION}-win64.exe"
+          cp target/release/yt-dlp-clipper.exe "cooper-clipper-${VERSION}-win64.exe"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: windows
-          path: yt-dlp-clipper-*-win64.exe
+          path: cooper-clipper-*-win64.exe
 
   macos:
     runs-on: macos-14   # Apple Silicon (arm64) only; Intel macOS dropped (macos-13 image retired Dec 2025)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Derive version from tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -172,23 +180,36 @@ jobs:
       - name: Build macOS .app + .dmg
         run: ./scripts/make-macos.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: macos
-          path: yt-dlp-clipper-*-macos-*.dmg
+          # .dmg for fresh installs; .zip of the bare .app is self-update's
+          # payload (a .dmg is a distribution container, not a swap target).
+          path: |
+            cooper-clipper-*-macos-*.dmg
+            cooper-clipper-*-macos-*.zip
 
   release:
     needs: [linux, windows, macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+
       - name: Collect build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: dist
 
+      - name: Write self-update manifest
+        run: |
+          ./scripts/make-release-manifest.sh dist/latest.json \
+            linux-x86_64 'dist/linux/*.AppImage' \
+            windows-x86_64 'dist/windows/*.exe' \
+            macos-aarch64 'dist/macos/*.zip'
+
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           files: dist/**/*

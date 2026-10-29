@@ -1,6 +1,7 @@
 use crate::app::action::Action;
 use crate::app::download::Download;
 use crate::app::ui::error_panel;
+use crate::app::ui::update_banner;
 use crate::format::fmt_size;
 use crate::app::jobs::{Jobs, Msg};
 use crate::app::settings::Settings;
@@ -58,10 +59,9 @@ pub(crate) fn show(
                 if (fetch.clicked() || submitted) && !is_worker_busy && is_url_present {
                     action = Some(Action::Fetch);
                 }
-                if ui.button("Open file…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        action = Some(Action::OpenFile(path));
-                    }
+                if ui.button("Open file…").clicked()
+                    && let Some(path) = rfd::FileDialog::new().pick_file() {
+                    action = Some(Action::OpenFile(path));
                 }
                 if ui.button("Open from cache…").clicked() {
                     ui_state.cache.open();
@@ -119,7 +119,7 @@ pub(crate) fn show(
                         download.want_audio,
                     );
                     let url = download.url.clone();
-                    let cookies = settings.cookies.clone();
+                    let cookies = download.sign_in_cookies.clone();
                     let dir = settings.effective_download_dir();
                     let _ = std::fs::create_dir_all(&dir);
                     jobs.status = "downloading…".into();
@@ -160,14 +160,13 @@ pub(crate) fn show(
                 ui.set_min_height(button_height(ui));
                 ui.label("Status:");
                 ui.monospace(&jobs.status);
-                if let Some(saved) = &jobs.saved_path {
-                    if ui.button("Open folder").clicked() {
-                        reveal_in_file_manager(saved);
-                    }
+                if let Some(saved) = &jobs.saved_path && ui.button("Open folder").clicked() {
+                    reveal_in_file_manager(saved);
                 }
             });
         }
         error_panel::show(ui, jobs, settings);
+        update_banner::show(ui, jobs, ui_state);
         if let Some((downloaded, total)) = jobs.progress {
             let frac =
                 if total > 0 { (downloaded as f32 / total as f32).clamp(0.0, 1.0) } else { 0.0 };
