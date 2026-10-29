@@ -124,11 +124,13 @@ impl App {
                 Ok(Msg::Progress { downloaded, total }) => {
                     self.jobs.progress = Some((downloaded, total))
                 }
-                Ok(Msg::Info(info)) => {
+                Ok(Msg::Info(fetched)) => {
+                    let info = fetched.info;
                     let status = format!("{} — {} formats", info.title, info.formats.len());
                     self.jobs.succeed(status);
                     self.download.selected_height = None;
                     self.download.info = Some(info);
+                    self.download.sign_in_cookies = fetched.sign_in_cookies;
                     return;
                 }
                 Ok(Msg::Downloaded(path)) => {
@@ -217,7 +219,6 @@ impl App {
         self.jobs.download_cancel.store(true, Ordering::Relaxed);
         self.jobs.download_cancel = Arc::new(AtomicBool::new(false));
         self.export_options.scale_height = None;
-        self.download.selected_height = None;
     }
 
     fn load_video(&mut self, path: PathBuf) {
@@ -456,10 +457,12 @@ impl App {
                 let cookies = self.settings.cookies.clone();
                 self.reset_for_new_video();
                 self.download.info = None;
+                self.download.sign_in_cookies = None;
                 self.jobs.status = "fetching…".into();
                 self.jobs.spawn(move |tx| {
-                    let _ = tx.send(match ytdlp::fetch_info(&url, cookies.as_ref()) {
-                        Ok(info) => Msg::Info(info),
+                    let fetched = ytdlp::fetch_info_signing_in_if_needed(&url, cookies.as_ref());
+                    let _ = tx.send(match fetched {
+                        Ok(fetched) => Msg::Info(fetched),
                         Err(e) => Msg::Error(e.to_string()),
                     });
                 });
@@ -467,6 +470,7 @@ impl App {
             Action::OpenFile(path) => {
                 self.load_video(path);
                 self.download.info = None;
+                self.download.sign_in_cookies = None;
                 self.download.url.clear();
                 self.jobs.status.clear();
             }

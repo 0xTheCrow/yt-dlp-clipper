@@ -119,7 +119,7 @@ pub(crate) fn show(
                         download.want_audio,
                     );
                     let url = download.url.clone();
-                    let cookies = settings.cookies.clone();
+                    let cookies = download.sign_in_cookies.clone();
                     let dir = settings.effective_download_dir();
                     let _ = std::fs::create_dir_all(&dir);
                     jobs.status = "downloading…".into();

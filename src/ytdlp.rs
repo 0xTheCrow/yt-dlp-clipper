@@ -347,6 +347,34 @@ pub fn fetch_info(url: &str, cookies: Option<&CookieSource>) -> Result<VideoInfo
     Ok(info)
 }
 
+/// A fetched video and the cookies its fetch needed: `None` for a video that
+/// fetched without signing in.
+pub struct FetchedVideo {
+    pub info: VideoInfo,
+    pub sign_in_cookies: Option<CookieSource>,
+}
+
+/// `fetch_info` without cookies, retrying with `cookies` only when yt-dlp says
+/// the video needs sign-in. Cookies move yt-dlp onto YouTube clients that a
+/// public video doesn't need and that fail more often, so they're sent only
+/// when signing in is the alternative to failing.
+pub fn fetch_info_signing_in_if_needed(
+    url: &str,
+    cookies: Option<&CookieSource>,
+) -> Result<FetchedVideo> {
+    let error = match fetch_info(url, None) {
+        Ok(info) => return Ok(FetchedVideo { info, sign_in_cookies: None }),
+        Err(error) => error,
+    };
+    match cookies {
+        Some(cookies) if suggests_cookies(&error.to_string()) => Ok(FetchedVideo {
+            info: fetch_info(url, Some(cookies))?,
+            sign_in_cookies: Some(cookies.clone()),
+        }),
+        _ => Err(error),
+    }
+}
+
 /// Download into `dir`, returning the produced file path. A `selector` of
 /// `None` lets yt-dlp use its default (best video + audio merged); otherwise
 /// it is passed verbatim to `-f`. `cookies` authenticates the request (browser

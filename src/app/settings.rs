@@ -44,9 +44,10 @@ pub(crate) struct Settings {
     pub(crate) volume: f32,
     /// Configurable shortcuts for clip + playback actions.
     pub(crate) keybinds: Keybinds,
-    /// Where fetch/download pull auth cookies from — a browser's live profile
-    /// or an exported `cookies.txt` — so age-gated or members-only videos work.
-    /// `None` sends no cookies.
+    /// Where auth cookies come from — a browser's live profile or an exported
+    /// `cookies.txt` — for a video whose fetch fails asking to sign in, such as
+    /// an age-gated or members-only one. Other videos never send them. `None`
+    /// sends no cookies.
     pub(crate) cookies: Option<CookieSource>,
     /// Check GitHub for a newer app release on launch. On by default; off
     /// means fully silent — no background check at all, not just a hidden one.

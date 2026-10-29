@@ -13,7 +13,7 @@ use yt_dlp_clipper::{updater, ytdlp};
 
 /// What a worker thread reports back over the shared channel.
 pub(crate) enum Msg {
-    Info(ytdlp::VideoInfo),
+    Info(ytdlp::FetchedVideo),
     Progress { downloaded: u64, total: u64 },
     Downloaded(PathBuf),
     Exported(PathBuf),

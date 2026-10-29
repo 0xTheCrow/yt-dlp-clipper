@@ -259,7 +259,8 @@ pub(crate) fn show(
                 ui.weak(path.display().to_string());
             }
             ui.small(
-                "Needed for age-restricted or members-only videos. \"From browser\" needs \
+                "Used only for videos that ask you to sign in, such as age-restricted or \
+                 members-only ones; other videos are fetched without them. \"From browser\" needs \
                  the browser closed if it reports the cookie database is locked; a cookies \
                  file (exported via a browser extension, e.g. \"Get cookies.txt\") works \
                  with the browser left open.",
