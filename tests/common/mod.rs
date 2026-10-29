@@ -18,7 +18,8 @@ pub fn init() {
     });
 }
 
-const SIZE: &str = "320x240";
+pub const WIDTH: u32 = 320;
+pub const HEIGHT: u32 = 240;
 pub const FPS: f64 = 30.0;
 pub const DURATION_SECS: f64 = 3.0;
 
@@ -28,7 +29,8 @@ pub fn generate(name: &str, encode_args: &[&str]) -> PathBuf {
     if path.exists() {
         return path;
     }
-    let lavfi_video = format!("testsrc=duration={DURATION_SECS}:size={SIZE}:rate={FPS}");
+    let lavfi_video =
+        format!("testsrc=duration={DURATION_SECS}:size={WIDTH}x{HEIGHT}:rate={FPS}");
     let lavfi_audio = format!("sine=frequency=440:duration={DURATION_SECS}");
     let status = Command::new("ffmpeg")
         .args(["-y", "-f", "lavfi", "-i", &lavfi_video])

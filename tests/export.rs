@@ -174,11 +174,33 @@ fn audio_only_mp3_reencodes_to_window() {
     assert!((dur - 2.0).abs() < 0.3, "audio duration {dur} not near 2.0");
 }
 
+fn packet_hashes(path: &Path, stream_selector: &str) -> Vec<String> {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", stream_selector, "-show_data_hash", "MD5"])
+        .args(["-show_entries", "packet=data_hash", "-of", "default=noprint_wrappers=1:nokey=1"])
+        .arg(path)
+        .output()
+        .expect("ffprobe must be installed to run these tests");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with("MD5:"))
+        .map(str::to_string)
+        .collect()
+}
+
 #[test]
 fn full_into_mkv_copies_streams() {
-    let out = run(Mode::Full, "export_full.mkv", 0.0, common::DURATION_SECS);
-    assert_eq!(codec_of(&out, "video"), "h264", "video should be copied");
-    assert_eq!(codec_of(&out, "audio"), "aac", "audio should be copied");
+    let source = common::h264_with_audio();
+    let out = run_from(source.clone(), Mode::Full, "export_full.mkv", 0.0, common::DURATION_SECS);
+    for stream_selector in ["v:0", "a:0"] {
+        let exported = packet_hashes(&out, stream_selector);
+        assert!(!exported.is_empty(), "stream {stream_selector} is missing from the export");
+        assert_eq!(
+            exported,
+            packet_hashes(&source, stream_selector),
+            "stream {stream_selector} was re-encoded instead of copied packet for packet"
+        );
+    }
 }
 
 #[test]
@@ -319,16 +341,17 @@ fn run_scaled(mode: Mode, out_name: &str, height: u32) -> (u32, u32) {
 
 #[test]
 fn clip_downscales_to_target_height() {
-    // Fixture is 320x240; 120 lines keeps the 4:3 aspect at 160x120.
-    let (w, h) = run_scaled(Mode::Clip, "scaled_clip.mp4", 120);
-    assert_eq!((w, h), (160, 120), "clip should downscale to 160x120");
+    let half_size = (common::WIDTH / 2, common::HEIGHT / 2);
+    let (w, h) = run_scaled(Mode::Clip, "scaled_clip.mp4", half_size.1);
+    assert_eq!((w, h), half_size, "clip should downscale to half size, keeping the aspect");
 }
 
 #[test]
 fn full_downscale_reencodes_from_copyable_source() {
     // h264-in-mp4 would normally remux-copy; a downscale forces a re-encode.
-    let (w, h) = run_scaled(Mode::Full, "scaled_full.mp4", 120);
-    assert_eq!((w, h), (160, 120), "full should downscale to 160x120");
+    let half_size = (common::WIDTH / 2, common::HEIGHT / 2);
+    let (w, h) = run_scaled(Mode::Full, "scaled_full.mp4", half_size.1);
+    assert_eq!((w, h), half_size, "full should downscale to half size, keeping the aspect");
 }
 
 /// Export `input` over a zero-length range, returning the result unwrapped.

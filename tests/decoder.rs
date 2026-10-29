@@ -5,8 +5,6 @@ use std::sync::OnceLock;
 use yt_dlp_clipper::decoder::{audio_duration_secs, Decoder};
 
 const FRAME_SECS: f64 = 1.0 / common::FPS;
-const WIDTH: u32 = 320;
-const HEIGHT: u32 = 240;
 
 fn open(path: &std::path::Path) -> Decoder {
     common::init();
@@ -51,8 +49,8 @@ fn h264_short_gop() -> PathBuf {
 #[test]
 fn reports_dimensions_and_duration() {
     let dec = open(&common::h264_with_audio());
-    assert_eq!(dec.width, WIDTH);
-    assert_eq!(dec.height, HEIGHT);
+    assert_eq!(dec.width, common::WIDTH);
+    assert_eq!(dec.height, common::HEIGHT);
     assert!(
         (dec.duration_secs() - common::DURATION_SECS).abs() < 0.2,
         "duration {} not near {}",
@@ -65,8 +63,8 @@ fn reports_dimensions_and_duration() {
 fn step_forward_yields_full_frames() {
     let mut dec = open(&common::h264_with_audio());
     let img = dec.step_forward().expect("first frame");
-    assert_eq!(img.size, [WIDTH as usize, HEIGHT as usize]);
-    assert_eq!(img.pixels.len(), (WIDTH * HEIGHT) as usize);
+    assert_eq!(img.size, [common::WIDTH as usize, common::HEIGHT as usize]);
+    assert_eq!(img.pixels.len(), (common::WIDTH * common::HEIGHT) as usize);
 }
 
 #[test]
@@ -147,13 +145,6 @@ fn backward_jump_beyond_video_length_clamps_to_start() {
     dec.seek_secs(1.0).expect("seek frame");
     dec.step_by(-1000).expect("clamped first frame");
     assert!(dec.current_secs().abs() < 0.05, "expected to clamp to 0, got {}", dec.current_secs());
-}
-
-#[test]
-fn decodes_vp9() {
-    let mut dec = open(&common::vp9());
-    assert!(dec.step_forward().is_some(), "vp9 first frame should decode");
-    assert!(dec.seek_secs(1.5).is_some(), "vp9 seek should decode");
 }
 
 #[test]

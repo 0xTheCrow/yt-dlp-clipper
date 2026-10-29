@@ -140,10 +140,7 @@ fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        check, newer_release, parse_version, platform_asset_suffix, select_asset, Asset,
-        ReleaseResponse,
-    };
+    use super::{check, newer_release, parse_version, select_asset, Asset, ReleaseResponse};
 
     /// Reaches the real GitHub endpoint; run with `cargo test -- --ignored`.
     #[test]
@@ -191,12 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn orders_components_numerically_not_lexically() {
-        assert!(parse_version("v0.1.10") > parse_version("v0.1.9"));
-        assert!(parse_version("v0.10.0") > parse_version("v0.9.9"));
-    }
-
-    #[test]
     fn offers_only_releases_above_the_running_build() {
         assert!(newer_release(&release("v0.1.5"), "0.1.4").is_some());
         assert!(newer_release(&release("v0.1.4"), "0.1.4").is_none());
@@ -206,12 +197,6 @@ mod tests {
     #[test]
     fn unparseable_tag_offers_nothing() {
         assert!(newer_release(&release("nightly"), "0.1.4").is_none());
-    }
-
-    #[test]
-    fn reported_version_drops_the_tag_prefix() {
-        let offered = newer_release(&release("v0.2.0"), "0.1.4").expect("newer");
-        assert_eq!(offered.version, "0.2.0");
     }
 
     #[test]
@@ -237,10 +222,6 @@ mod tests {
         let assets =
             [asset("yt-dlp-clipper-x86_64.AppImage"), asset("yt-dlp-clipper-0.2.0-win64.exe")];
         assert_eq!(
-            select_asset(&assets, "x86_64.AppImage"),
-            Some("https://example.com/yt-dlp-clipper-x86_64.AppImage".into())
-        );
-        assert_eq!(
             select_asset(&assets, "win64.exe"),
             Some("https://example.com/yt-dlp-clipper-0.2.0-win64.exe".into())
         );
@@ -250,16 +231,5 @@ mod tests {
     fn select_asset_finds_nothing_for_an_unmatched_platform() {
         let assets = [asset("yt-dlp-clipper-0.2.0-win64.exe")];
         assert_eq!(select_asset(&assets, "x86_64.AppImage"), None);
-    }
-
-    #[test]
-    fn check_errors_rather_than_panics_without_a_matching_asset() {
-        // `check()` itself needs a live HTTP call, so this exercises the same
-        // decision inline: a newer release with no matching asset must not
-        // silently offer `None` (that reads as "you're current") nor panic.
-        let release = release("v99.0.0");
-        let available = newer_release(&release, env!("CARGO_PKG_VERSION")).expect("newer");
-        assert!(select_asset(&release.assets, platform_asset_suffix()).is_none());
-        assert_eq!(available.asset_url, "");
     }
 }

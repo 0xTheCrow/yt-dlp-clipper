@@ -164,16 +164,4 @@ mod tests {
         assert!(!pending.staged.exists());
         assert!(!pending.backup.exists());
     }
-
-    #[test]
-    fn reaches_the_launch_attempt_limit_after_repeated_failures() {
-        let dir = std::env::temp_dir().join("yt_dlp_clipper_pending_swap_attempts");
-        let _ = std::fs::create_dir_all(&dir);
-        let mut pending = swap(&dir);
-        for _ in 0..UPDATE_LAUNCH_ATTEMPT_LIMIT {
-            assert!(pending.launch_attempts < UPDATE_LAUNCH_ATTEMPT_LIMIT);
-            pending.launch_attempts += 1;
-        }
-        assert!(pending.launch_attempts >= UPDATE_LAUNCH_ATTEMPT_LIMIT);
-    }
 }

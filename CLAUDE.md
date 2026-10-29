@@ -56,6 +56,16 @@ The tests cover the lib only; the GUI under `src/app/` has none. After a GUI cha
 - **`cargo clippy --all-targets` is clean** — keep it at zero warnings.
 - This machine has no usable `sudo`; system packages must be installed by the user.
 
+## Testing
+
+- When asked to write tests, propose the cases first (what's covered, at what level, with what assertions) and wait for approval before writing any code.
+- Before proposing, prune the brainstormed cases and drop the trivial ones rather than presenting the raw list. A case is trivial if it asserts something the type system, std, a library, or an existing test already guarantees: a test whose code path has no special-casing for the input it varies (so it only exercises egui or std), or two cases covering the same branch through cosmetically different inputs (collapse them). If a cut is debatable, name what was dropped and why so the user can pull it back.
+- Tests target the **expected behavior / contract**, not a snapshot of the current implementation. A refactor that preserves behavior must not require updating tests.
+- Don't hardcode values that are defined as constants in source (a cap, a threshold, a radius, a timeout). Reference the constant, or derive from it, making it `pub(crate)` first if needed. A copied literal desyncs silently when the constant is retuned.
+- Don't test what the type system already guarantees. Spend test effort on what types can't catch: state transitions, sequencing across frames or threads, side effects, edge cases in runtime logic.
+- **Check that every new test can fail.** Before calling a test done, break the behavior it covers (invert a condition, drop a clamp, skip a call) and confirm the test goes red, then restore the code. A test that stays green against a broken behavior is deleted or rewritten, not kept.
+- Never write a test that passes while the behavior it covers is broken. No `#[ignore]` (except tests needing the network, like `live_youtube`), `#[should_panic]` workarounds, or inverted or weakened assertions to keep the suite green around a known defect. A real defect gets a test that stays red until it's fixed.
+
 ## Planned / TODO
 
 ### Frame-step forward optimization (not built)

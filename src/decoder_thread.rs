@@ -179,14 +179,17 @@ mod tests {
     use std::time::Duration;
 
     const FIXTURE_DURATION_SECS: f64 = 3.0;
+    const FIXTURE_WIDTH: u32 = 320;
+    const FIXTURE_HEIGHT: u32 = 240;
     const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 
     fn fixture(name: &str, encode_args: &[&str]) -> String {
         let path = std::env::temp_dir().join(name);
         if !path.exists() {
             let lavfi_audio = format!("sine=frequency=440:duration={FIXTURE_DURATION_SECS}");
+            let fixture_size = format!("{FIXTURE_WIDTH}x{FIXTURE_HEIGHT}");
             let lavfi_video =
-                format!("testsrc=duration={FIXTURE_DURATION_SECS}:size=320x240:rate=30");
+                format!("testsrc=duration={FIXTURE_DURATION_SECS}:size={fixture_size}:rate=30");
             let status = Command::new("ffmpeg")
                 .args(["-y", "-f", "lavfi", "-i", &lavfi_video])
                 .args(["-f", "lavfi", "-i", &lavfi_audio])
@@ -229,7 +232,7 @@ mod tests {
         );
         match first_event(path) {
             DecodeEvent::Opened { width, height, .. } => {
-                assert_eq!((width, height), (320, 240));
+                assert_eq!((width, height), (FIXTURE_WIDTH, FIXTURE_HEIGHT));
             }
             _ => panic!("a source with video should open as a video"),
         }
