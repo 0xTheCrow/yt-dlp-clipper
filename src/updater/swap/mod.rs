@@ -50,7 +50,7 @@ pub fn restore_backup(pending: &PendingSwap) -> Result<()> {
 pub fn relaunch_and_exit(target: &Path) -> ! {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = std::process::Command::new(target).spawn();
+        let _ = crate::launch_lock::spawn(&mut std::process::Command::new(target));
     }
     #[cfg(target_os = "macos")]
     {

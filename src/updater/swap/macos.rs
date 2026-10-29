@@ -1,3 +1,4 @@
+use crate::launch_lock;
 use crate::updater::stage::PendingSwap;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -26,12 +27,9 @@ pub fn current_install_target() -> Result<PathBuf> {
 pub fn unzip_app(zip_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("creating {}", dest_dir.display()))?;
-    let status = Command::new("unzip")
-        .args(["-q", "-o"])
-        .arg(zip_path)
-        .arg("-d")
-        .arg(dest_dir)
-        .status()
+    let status = launch_lock::status(
+        Command::new("unzip").args(["-q", "-o"]).arg(zip_path).arg("-d").arg(dest_dir),
+    )
         .context("running unzip")?;
     if !status.success() {
         bail!("unzip exited with {status}");
@@ -74,12 +72,13 @@ pub fn apply(pending: &PendingSwap) -> Result<()> {
     );
     std::fs::write(&helper_path, script).context("writing the macOS update helper script")?;
     set_executable(&helper_path)?;
-    Command::new("/bin/sh")
-        .arg(&helper_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    launch_lock::spawn(
+        Command::new("/bin/sh")
+            .arg(&helper_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
         .context("spawning the macOS update helper")?;
     Ok(())
 }

@@ -140,12 +140,25 @@ impl Decoder {
 
     /// Decode the next frame in presentation order. None at end of stream.
     pub fn step_forward(&mut self) -> Option<egui::ColorImage> {
-        let mut frame = Video::empty();
-        if !self.receive_next(&mut frame) {
+        self.step_forward_by(1)
+    }
+
+    fn step_forward_by(&mut self, steps: usize) -> Option<egui::ColorImage> {
+        let mut landed = Video::empty();
+        let mut decoded = Video::empty();
+        let mut has_landed = false;
+        for _ in 0..steps {
+            if !self.receive_next(&mut decoded) {
+                break;
+            }
+            self.current_pts = decoded.pts().unwrap_or(self.current_pts);
+            std::mem::swap(&mut landed, &mut decoded);
+            has_landed = true;
+        }
+        if !has_landed {
             return None;
         }
-        self.current_pts = frame.pts().unwrap_or(self.current_pts);
-        self.convert_to_image(&mut frame)
+        self.convert_to_image(&mut landed)
     }
 
     /// Step `n` frames from the current position: forward (`n > 0`) decodes
@@ -155,16 +168,7 @@ impl Decoder {
     pub fn step_by(&mut self, n: i64) -> Option<egui::ColorImage> {
         use std::cmp::Ordering;
         match n.cmp(&0) {
-            Ordering::Greater => {
-                let mut image = None;
-                for _ in 0..n {
-                    match self.step_forward() {
-                        Some(img) => image = Some(img),
-                        None => break,
-                    }
-                }
-                image
-            }
+            Ordering::Greater => self.step_forward_by(n as usize),
             Ordering::Less => self.step_backward_by((-n) as usize),
             Ordering::Equal => None,
         }

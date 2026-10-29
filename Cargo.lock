@@ -5119,6 +5119,7 @@ dependencies = [
  "egui_extras",
  "ffmpeg-the-third",
  "rfd",
+ "ring",
  "serde",
  "serde_json",
  "ureq",

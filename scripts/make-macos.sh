@@ -137,13 +137,13 @@ dylibbundler -cd -b \
 # preserves the bundle's resource forks/extended attributes and code-signing
 # layout the way Finder's own "Compress" does.
 echo "==> Building .zip"
-ZIP="$ROOT/yt-dlp-clipper-$VERSION-macos-$ARCH.zip"
+ZIP="$ROOT/cooper-clipper-$VERSION-macos-$ARCH.zip"
 rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 
 # --- package a .dmg -----------------------------------------------------------
 echo "==> Building .dmg"
-DMG="$ROOT/yt-dlp-clipper-$VERSION-macos-$ARCH.dmg"
+DMG="$ROOT/cooper-clipper-$VERSION-macos-$ARCH.dmg"
 rm -f "$DMG"
 STAGE="$BUILD/dmg"
 rm -rf "$STAGE"; mkdir -p "$STAGE"

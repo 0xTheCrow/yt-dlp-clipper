@@ -285,7 +285,7 @@ fn download_probe_and_stage(release: &updater::AvailableRelease, tx: &Sender<Upd
         let filename = release.asset_url.rsplit('/').next().unwrap_or("update-payload");
         let raw_path = staging_dir.join(filename);
 
-        stage::download_to(&release.asset_url, &raw_path, |downloaded, total| {
+        stage::download_to(&release.asset_url, &raw_path, &release.sha256, |downloaded, total| {
             let _ = tx.send(UpdateApplyMsg::Progress(downloaded, total));
         })?;
         mark_executable(&raw_path)?;

@@ -1,5 +1,6 @@
 //! Thin wrapper around the `yt-dlp` binary (spawned as a subprocess).
 
+use crate::launch_lock;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read};
@@ -263,9 +264,7 @@ pub fn suggests_cookies(text: &str) -> bool {
 
 /// The installed yt-dlp's version string (`yt-dlp --version`), trimmed.
 pub fn version() -> Result<String> {
-    let output = Command::new(binary())
-        .arg("--version")
-        .output()
+    let output = launch_lock::output(Command::new(binary()).arg("--version"))
         .context("failed to run yt-dlp — is it installed and on PATH?")?;
     if !output.status.success() {
         bail!("yt-dlp --version failed: {}", String::from_utf8_lossy(&output.stderr));
@@ -276,9 +275,7 @@ pub fn version() -> Result<String> {
 /// Self-update via `yt-dlp -U`, returning yt-dlp's report. `-U` is a no-op when
 /// already current, so the click itself doubles as the up-to-date check.
 pub fn update() -> Result<String> {
-    let output = Command::new(binary())
-        .arg("-U")
-        .output()
+    let output = launch_lock::output(Command::new(binary()).arg("-U"))
         .context("failed to run yt-dlp — is it installed and on PATH?")?;
     let report = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !output.status.success() {
@@ -334,9 +331,7 @@ pub fn fetch_info(url: &str, cookies: Option<&CookieSource>) -> Result<VideoInfo
     // `--` ends option parsing so a URL starting with `-` can't be taken as a
     // yt-dlp flag (e.g. `--exec`, `--config-location`).
     args.extend(["--", url]);
-    let output = Command::new(binary())
-        .args(&args)
-        .output()
+    let output = launch_lock::output(Command::new(binary()).args(&args))
         .context("failed to run yt-dlp — is it installed and on PATH?")?;
 
     if !output.status.success() {
@@ -405,11 +400,9 @@ pub fn download(
         url,
     ]);
 
-    let mut child = Command::new(binary())
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut child = launch_lock::spawn(
+        Command::new(binary()).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()),
+    )
         .context("failed to run yt-dlp — is it installed and on PATH?")?;
 
     let stdout = child.stdout.take().expect("piped stdout");

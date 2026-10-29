@@ -2,6 +2,7 @@
 //! install, so a wrong-arch asset, an unmet glibc floor, or a corrupt download
 //! is caught on the user's actual machine while the old build can still run.
 
+use crate::launch_lock;
 use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -20,7 +21,7 @@ const SELF_TEST_FLAG: &str = "--self-test";
 /// must not swap this payload in. Signals on **exit code, not stdout**: a
 /// future `windows_subsystem = "windows"` would silently break a stdout probe.
 pub fn self_test(payload: &Path, timeout: Duration) -> std::io::Result<bool> {
-    let mut child = Command::new(payload).arg(SELF_TEST_FLAG).spawn()?;
+    let mut child = launch_lock::spawn(Command::new(payload).arg(SELF_TEST_FLAG))?;
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
@@ -51,6 +52,7 @@ mod tests {
         let _ = fs::create_dir_all(&dir);
         let path = dir.join(name);
         fs::write(&path, script).unwrap();
+        launch_lock::await_launches_in_progress();
         #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
@@ -73,7 +75,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn fails_when_self_test_hangs_past_the_timeout() {
-        let path = shim("hangs.sh", "#!/bin/sh\nsleep 30\n");
+        let path = shim("hangs.sh", "#!/bin/sh\nexec tail -f /dev/null\n");
         assert!(!self_test(&path, Duration::from_millis(200)).unwrap());
     }
 }

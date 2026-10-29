@@ -78,6 +78,44 @@ fn step_forward_advances_exactly_one_frame() {
 }
 
 #[test]
+fn a_forward_jump_lands_exactly_that_many_frames_ahead() {
+    const JUMP_FRAMES: i64 = 10;
+    let mut dec = open(&common::h264_with_audio());
+    dec.seek_secs(1.0).expect("seek frame");
+    let before = dec.current_secs();
+
+    let image = dec.step_by(JUMP_FRAMES).expect("frame after the jump");
+
+    let stepped_frames = (dec.current_secs() - before) / FRAME_SECS;
+    assert!(
+        (stepped_frames - JUMP_FRAMES as f64).abs() < 0.5,
+        "jumped {stepped_frames} frames, not {JUMP_FRAMES}"
+    );
+    let landed_frame = open(&common::h264_with_audio())
+        .seek_secs(dec.current_secs())
+        .expect("frame at the landed position");
+    assert!(image == landed_frame, "the jump returned a different frame than it landed on");
+}
+
+#[test]
+fn stepping_forward_past_the_end_lands_on_the_last_frame() {
+    let mut dec = open(&common::h264_with_audio());
+    let last_frame_secs = common::DURATION_SECS - FRAME_SECS;
+    dec.seek_secs(last_frame_secs - 3.0 * FRAME_SECS).expect("seek frame");
+    let frames_past_the_end = (common::FPS * common::DURATION_SECS) as i64;
+
+    let image = dec.step_by(frames_past_the_end);
+
+    assert!(image.is_some(), "overshooting the end returned no frame");
+    assert!(
+        (dec.current_secs() - last_frame_secs).abs() < FRAME_SECS / 2.0,
+        "landed at {}s, not the last frame at {last_frame_secs}s",
+        dec.current_secs()
+    );
+    assert!(dec.step_forward().is_none(), "a frame exists past the one it landed on");
+}
+
+#[test]
 fn seek_lands_near_target() {
     let mut dec = open(&common::h264_with_audio());
     dec.seek_secs(2.0).expect("seek frame");

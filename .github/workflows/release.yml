@@ -52,7 +52,7 @@ jobs:
           name: linux
           # Version-less by design (see make-appimage.sh) so self-update can
           # replace this file's contents in place without its name going stale.
-          path: yt-dlp-clipper-x86_64.AppImage
+          path: cooper-clipper-x86_64.AppImage
 
   windows:
     # One self-contained .exe: FFmpeg, the codecs, and the C runtime are all linked
@@ -155,12 +155,12 @@ jobs:
         shell: bash
         run: |
           VERSION="${VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
-          cp target/release/yt-dlp-clipper.exe "yt-dlp-clipper-${VERSION}-win64.exe"
+          cp target/release/yt-dlp-clipper.exe "cooper-clipper-${VERSION}-win64.exe"
 
       - uses: actions/upload-artifact@v5
         with:
           name: windows
-          path: yt-dlp-clipper-*-win64.exe
+          path: cooper-clipper-*-win64.exe
 
   macos:
     runs-on: macos-14   # Apple Silicon (arm64) only; Intel macOS dropped (macos-13 image retired Dec 2025)
@@ -186,18 +186,27 @@ jobs:
           # .dmg for fresh installs; .zip of the bare .app is self-update's
           # payload (a .dmg is a distribution container, not a swap target).
           path: |
-            yt-dlp-clipper-*-macos-*.dmg
-            yt-dlp-clipper-*-macos-*.zip
+            cooper-clipper-*-macos-*.dmg
+            cooper-clipper-*-macos-*.zip
 
   release:
     needs: [linux, windows, macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+
       - name: Collect build artifacts
         uses: actions/download-artifact@v6
         with:
           path: dist
+
+      - name: Write self-update manifest
+        run: |
+          ./scripts/make-release-manifest.sh dist/latest.json \
+            linux-x86_64 'dist/linux/*.AppImage' \
+            windows-x86_64 'dist/windows/*.exe' \
+            macos-aarch64 'dist/macos/*.zip'
 
       - name: Publish release
         uses: softprops/action-gh-release@v3

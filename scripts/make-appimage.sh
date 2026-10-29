@@ -67,7 +67,7 @@ echo "==> Packing AppImage"
 # entry's Name=, "Cooper Clipper", and the release workflow's upload glob misses
 # it). Deliberately version-less: self-update replaces this file's *contents* in
 # place, so a version-stamped name would start lying the first time it runs.
-export OUTPUT="yt-dlp-clipper-x86_64.AppImage"
+export OUTPUT="cooper-clipper-x86_64.AppImage"
 "$BUILD/linuxdeploy.AppImage" \
     --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/yt-dlp-clipper" \
@@ -75,4 +75,4 @@ export OUTPUT="yt-dlp-clipper-x86_64.AppImage"
     --icon-file "$ROOT/assets/yt-dlp-clipper.png" \
     --output appimage
 
-echo "==> Done: $(ls -1 "$ROOT"/yt-dlp-clipper*.AppImage 2>/dev/null | tail -1)"
+echo "==> Done: $(ls -1 "$ROOT"/cooper-clipper*.AppImage 2>/dev/null | tail -1)"

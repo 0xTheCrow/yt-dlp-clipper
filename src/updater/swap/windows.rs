@@ -1,3 +1,4 @@
+use crate::launch_lock;
 use crate::updater::stage::PendingSwap;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -21,5 +22,6 @@ pub fn apply(pending: &PendingSwap) -> Result<()> {
     std::fs::copy(&pending.staged, &pending.target).with_context(|| {
         format!("copying {} to {}", pending.staged.display(), pending.target.display())
     })?;
+    launch_lock::await_launches_in_progress();
     Ok(())
 }

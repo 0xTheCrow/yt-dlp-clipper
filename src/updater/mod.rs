@@ -13,6 +13,7 @@ pub mod swap;
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::time::Duration;
 use ureq::Agent;
 
@@ -28,15 +29,20 @@ const UPDATE_REQUEST_TIMEOUT_SECS: u64 = 15;
 /// doesn't retry every launch and a healthy check doesn't spam GitHub.
 pub const UPDATE_CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
-/// A published release newer than the running build, with the asset matching
-/// this platform already resolved.
+/// The manifest each release publishes beside its builds, written by
+/// `scripts/make-release-manifest.sh`.
+const MANIFEST_ASSET_NAME: &str = "latest.json";
+
+/// A published release newer than the running build, with this platform's
+/// update payload already resolved from the release manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AvailableRelease {
     pub version: String,
     pub notes: String,
     pub page_url: String,
-    /// Direct download URL for the asset matching `platform_asset_suffix()`.
     pub asset_url: String,
+    /// Lowercase hex SHA-256 the downloaded payload must match.
+    pub sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -55,66 +61,87 @@ struct Asset {
     browser_download_url: String,
 }
 
-/// The release-asset filename suffix this build's platform publishes, matching
-/// the packaging scripts: `make-appimage.sh`'s stable `yt-dlp-clipper-x86_64.AppImage`,
-/// `release.yml`'s `yt-dlp-clipper-<ver>-win64.exe`, and `make-macos.sh`'s
-/// `yt-dlp-clipper-<ver>-macos-{arm64,x86_64}.zip` (a `.zip` of the bare `.app`,
-/// not the `.dmg` — a `.dmg` is a distribution container, not a swap target).
-#[cfg(target_os = "linux")]
-fn platform_asset_suffix() -> &'static str {
-    "x86_64.AppImage"
-}
-#[cfg(target_os = "windows")]
-fn platform_asset_suffix() -> &'static str {
-    "win64.exe"
-}
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn platform_asset_suffix() -> &'static str {
-    "macos-arm64.zip"
-}
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-fn platform_asset_suffix() -> &'static str {
-    "macos-x86_64.zip"
+#[derive(Deserialize)]
+struct ReleaseManifest {
+    platforms: HashMap<String, ManifestEntry>,
 }
 
-/// The download URL of the first asset whose name ends with `suffix`.
-fn select_asset(assets: &[Asset], suffix: &str) -> Option<String> {
-    assets.iter().find(|a| a.name.ends_with(suffix)).map(|a| a.browser_download_url.clone())
+#[derive(Deserialize)]
+struct ManifestEntry {
+    file: String,
+    sha256: String,
+}
+
+/// This build's key in the release manifest: `linux-x86_64`, `windows-x86_64`,
+/// `macos-aarch64`, and so on.
+fn platform_key() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn asset_url(assets: &[Asset], name: &str) -> Option<String> {
+    assets.iter().find(|asset| asset.name == name).map(|asset| asset.browser_download_url.clone())
+}
+
+/// The download URL and SHA-256 of `platform`'s update payload.
+fn resolve_payload(
+    manifest: &ReleaseManifest,
+    assets: &[Asset],
+    platform: &str,
+) -> Result<(String, String)> {
+    let entry = manifest
+        .platforms
+        .get(platform)
+        .with_context(|| format!("the release publishes no build for {platform}"))?;
+    let url = asset_url(assets, &entry.file).with_context(|| {
+        format!("the release manifest names {}, which the release doesn't include", entry.file)
+    })?;
+    Ok((url, entry.sha256.clone()))
+}
+
+fn fetch_text(agent: &Agent, url: &str) -> Result<String> {
+    agent
+        .get(url)
+        .header("User-Agent", UPDATE_USER_AGENT)
+        .call()
+        .with_context(|| format!("requesting {url}"))?
+        .body_mut()
+        .read_to_string()
+        .with_context(|| format!("reading {url}"))
 }
 
 /// Ask GitHub for the newest published release; `Ok(None)` means the running
 /// build is already current. Errors (rather than silently offering nothing)
-/// when a newer release exists but publishes no asset for this platform, since
+/// when a newer release has no manifest or no build for this platform, since
 /// that's a release-process mistake worth surfacing, not a normal "no update".
 pub fn check() -> Result<Option<AvailableRelease>> {
+    check_from(RELEASES_API_URL, env!("CARGO_PKG_VERSION"))
+}
+
+/// `check()` against any GitHub-shaped release feed at `releases_url`, as if the
+/// running build were `running_version`.
+pub fn check_from(releases_url: &str, running_version: &str) -> Result<Option<AvailableRelease>> {
     let agent: Agent = Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(UPDATE_REQUEST_TIMEOUT_SECS)))
         .build()
         .into();
-    let body = agent
-        .get(RELEASES_API_URL)
-        .header("User-Agent", UPDATE_USER_AGENT)
-        .call()
-        .context("asking GitHub for the latest release")?
-        .body_mut()
-        .read_to_string()
-        .context("reading GitHub's release response")?;
-    let release: ReleaseResponse =
-        serde_json::from_str(&body).context("parsing GitHub's release response")?;
-    let Some(mut available) = newer_release(&release, env!("CARGO_PKG_VERSION")) else {
+    let release: ReleaseResponse = serde_json::from_str(&fetch_text(&agent, releases_url)?)
+        .context("parsing GitHub's release response")?;
+    let Some(mut available) = newer_release(&release, running_version) else {
         return Ok(None);
     };
-    let suffix = platform_asset_suffix();
-    let Some(asset_url) = select_asset(&release.assets, suffix) else {
-        bail!("release {} has no {suffix} asset for this platform", available.version);
+    let Some(manifest_url) = asset_url(&release.assets, MANIFEST_ASSET_NAME) else {
+        bail!("release {} publishes no {MANIFEST_ASSET_NAME}", available.version);
     };
+    let manifest: ReleaseManifest = serde_json::from_str(&fetch_text(&agent, &manifest_url)?)
+        .context("parsing the release manifest")?;
+    let (asset_url, sha256) = resolve_payload(&manifest, &release.assets, &platform_key())?;
     available.asset_url = asset_url;
+    available.sha256 = sha256;
     Ok(Some(available))
 }
 
-/// The release, when its tag names a version above `running`. `asset_url` is
-/// left empty here — `check()` fills it in, since asset selection needs the
-/// full asset list this pure function doesn't take.
+/// The release, when its tag names a version above `running`. `asset_url` and
+/// `sha256` are left empty here; `check()` fills them from the manifest.
 fn newer_release(release: &ReleaseResponse, running: &str) -> Option<AvailableRelease> {
     let latest = parse_version(&release.tag_name)?;
     let current = parse_version(running)?;
@@ -123,6 +150,7 @@ fn newer_release(release: &ReleaseResponse, running: &str) -> Option<AvailableRe
         notes: release.body.clone(),
         page_url: release.html_url.clone(),
         asset_url: String::new(),
+        sha256: String::new(),
     })
 }
 
@@ -140,7 +168,11 @@ fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check, newer_release, parse_version, select_asset, Asset, ReleaseResponse};
+    use super::{
+        check, newer_release, parse_version, resolve_payload, Asset, ManifestEntry,
+        ReleaseManifest, ReleaseResponse,
+    };
+    use std::collections::HashMap;
 
     /// Reaches the real GitHub endpoint; run with `cargo test -- --ignored`.
     #[test]
@@ -156,10 +188,6 @@ mod tests {
             html_url: String::new(),
             assets: Vec::new(),
         }
-    }
-
-    fn asset(name: &str) -> Asset {
-        Asset { name: name.into(), browser_download_url: format!("https://example.com/{name}") }
     }
 
     #[test]
@@ -217,19 +245,26 @@ mod tests {
         assert!(offered.page_url.ends_with("/tag/v0.2.0"));
     }
 
-    #[test]
-    fn select_asset_matches_by_suffix() {
-        let assets =
-            [asset("yt-dlp-clipper-x86_64.AppImage"), asset("yt-dlp-clipper-0.2.0-win64.exe")];
-        assert_eq!(
-            select_asset(&assets, "win64.exe"),
-            Some("https://example.com/yt-dlp-clipper-0.2.0-win64.exe".into())
-        );
+    fn manifest_naming(platform: &str, file: &str) -> ReleaseManifest {
+        let entry = ManifestEntry { file: file.into(), sha256: "0".repeat(64) };
+        ReleaseManifest { platforms: HashMap::from([(platform.to_string(), entry)]) }
+    }
+
+    fn asset(name: &str) -> Asset {
+        Asset { name: name.into(), browser_download_url: format!("https://example.com/{name}") }
     }
 
     #[test]
-    fn select_asset_finds_nothing_for_an_unmatched_platform() {
-        let assets = [asset("yt-dlp-clipper-0.2.0-win64.exe")];
-        assert_eq!(select_asset(&assets, "x86_64.AppImage"), None);
+    fn resolving_errors_when_the_manifest_lacks_this_platform() {
+        let manifest = manifest_naming("windows-x86_64", "cooper-clipper-win64.exe");
+        let assets = [asset("cooper-clipper-win64.exe")];
+        assert!(resolve_payload(&manifest, &assets, "linux-x86_64").is_err());
+    }
+
+    #[test]
+    fn resolving_errors_when_the_named_file_is_not_in_the_release() {
+        let manifest = manifest_naming("linux-x86_64", "cooper-clipper-x86_64.AppImage");
+        let assets = [asset("cooper-clipper-win64.exe")];
+        assert!(resolve_payload(&manifest, &assets, "linux-x86_64").is_err());
     }
 }

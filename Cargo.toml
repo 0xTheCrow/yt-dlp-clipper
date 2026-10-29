@@ -49,6 +49,7 @@ anyhow = "1"
 
 # HTTPS for the GitHub release check (no std equivalent)
 ureq = "3.4"
+ring = "0.17"
 
 [features]
 # Default builds link the system FFmpeg dynamically (fast, for development).

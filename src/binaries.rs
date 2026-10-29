@@ -1,5 +1,6 @@
 use crate::STORAGE_APP_ID;
 use std::path::{Path, PathBuf};
+use yt_dlp_clipper::launch_lock;
 
 /// Cross-platform directory for downloaded videos, under eframe's app data dir.
 pub(crate) fn managed_cache_dir() -> PathBuf {
@@ -116,6 +117,7 @@ fn set_owner_only(_path: &Path, _mode: u32) {}
 fn extract_to_managed(bytes: &[u8], name: &str) -> Option<PathBuf> {
     let dest = managed_bin_dir()?.join(name);
     std::fs::write(&dest, bytes).ok()?;
+    launch_lock::await_launches_in_progress();
     set_owner_only(&dest, 0o755);
     Some(dest)
 }
@@ -185,6 +187,7 @@ pub(crate) fn resolve_ytdlp() -> Option<PathBuf> {
     if let Some(source) = bundled_binary(YTDLP_EXE).or_else(|| find_in_path(YTDLP_EXE)) {
         return match &managed {
             Some(m) if std::fs::copy(&source, m).is_ok() => {
+                launch_lock::await_launches_in_progress();
                 set_owner_only(m, 0o755);
                 Some(m.clone())
             }

@@ -1,3 +1,4 @@
+use crate::launch_lock;
 use crate::updater::stage::PendingSwap;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ pub fn apply(pending: &PendingSwap) -> Result<()> {
     std::fs::copy(&pending.target, &pending.backup).with_context(|| {
         format!("backing up {} to {}", pending.target.display(), pending.backup.display())
     })?;
+    launch_lock::await_launches_in_progress();
     atomic_replace(&pending.staged, &pending.target)
 }
 
@@ -35,6 +37,7 @@ fn atomic_replace(staged: &Path, target: &Path) -> Result<()> {
     let tmp = target.with_extension("update-tmp");
     std::fs::copy(staged, &tmp)
         .with_context(|| format!("copying {} to {}", staged.display(), tmp.display()))?;
+    launch_lock::await_launches_in_progress();
     std::fs::rename(&tmp, target)
         .with_context(|| format!("renaming {} to {}", tmp.display(), target.display()))?;
     let _ = std::fs::remove_file(staged);

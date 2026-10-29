@@ -7,7 +7,9 @@
 //! from `eframe`), the same way `ytdlp::download` takes its destination `dir`
 //! rather than computing one.
 
-use anyhow::{Context, Result};
+use crate::launch_lock;
+use anyhow::{bail, Context, Result};
+use ring::digest;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -29,9 +31,16 @@ pub const UPDATE_LAUNCH_ATTEMPT_LIMIT: u32 = 2;
 const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Download `url` to `dest`, reporting `(downloaded, total)` bytes as it goes.
-/// `total` is `0` when the server doesn't report `Content-Length`, matching
+/// Fails, deleting `dest`, unless the bytes hash to `expected_sha256` (hex), so
+/// a corrupted or substituted payload is never left behind to be run. `total`
+/// is `0` when the server doesn't report `Content-Length`, matching
 /// `ytdlp::download`'s progress-callback convention.
-pub fn download_to(url: &str, dest: &Path, mut on_progress: impl FnMut(u64, u64)) -> Result<()> {
+pub fn download_to(
+    url: &str,
+    dest: &Path,
+    expected_sha256: &str,
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<()> {
     let agent: Agent = Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(DOWNLOAD_REQUEST_TIMEOUT_SECS)))
         .build()
@@ -48,14 +57,24 @@ pub fn download_to(url: &str, dest: &Path, mut on_progress: impl FnMut(u64, u64)
     let mut reader = response.body_mut().as_reader();
     let mut buf = [0u8; DOWNLOAD_CHUNK_BYTES];
     let mut downloaded = 0u64;
+    let mut hasher = digest::Context::new(&digest::SHA256);
     loop {
         let read = reader.read(&mut buf).context("reading the update download")?;
         if read == 0 {
             break;
         }
         file.write_all(&buf[..read]).context("writing the update download to disk")?;
+        hasher.update(&buf[..read]);
         downloaded += read as u64;
         on_progress(downloaded, total);
+    }
+    drop(file);
+    launch_lock::await_launches_in_progress();
+    let downloaded_sha256: String =
+        hasher.finish().as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
+    if !downloaded_sha256.eq_ignore_ascii_case(expected_sha256) {
+        let _ = std::fs::remove_file(dest);
+        bail!("the downloaded update doesn't match the checksum its release published");
     }
     Ok(())
 }
