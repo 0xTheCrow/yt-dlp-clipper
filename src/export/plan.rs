@@ -208,7 +208,7 @@ impl StreamPlan {
 
     /// Whether every stream can be stream-copied, making the export a pure remux.
     pub(super) fn is_copy_only(&self) -> bool {
-        self.video.as_ref().map_or(true, |video| !video.reencode)
-            && self.audio.as_ref().map_or(true, |audio| audio.encode_to.is_none())
+        self.video.as_ref().is_none_or(|video| !video.reencode)
+            && self.audio.as_ref().is_none_or(|audio| audio.encode_to.is_none())
     }
 }

@@ -5,6 +5,7 @@ mod decoder_thread;
 mod format;
 mod keybinds;
 mod theme;
+mod update_lifecycle;
 mod widgets;
 
 use ffmpeg_the_third as ffmpeg;
@@ -26,6 +27,12 @@ const APP_DISPLAY_NAME: &str = "Cooper Clipper";
 /// loads its libraries on this machine before it replaces the installed one.
 const SELF_TEST_FLAG: &str = "--self-test";
 
+/// Carried by the macOS relaunch after its update helper swaps a new `.app`
+/// into place. It changes no behavior here — `update_lifecycle::handle_startup`
+/// runs unconditionally on every launch — it just needs to be consumed so it
+/// isn't mistaken for `cli_path`.
+const FINISH_UPDATE_FLAG: &str = "--finish-update";
+
 /// Exercise the startup work that depends on the host: the tool binaries the
 /// caller has already resolved, and linking against libav*. A non-zero exit
 /// marks the build unusable here.
@@ -36,6 +43,10 @@ fn self_test() -> eframe::Result<()> {
 }
 
 fn main() -> eframe::Result<()> {
+    // Before anything riskier runs (GUI/GPU init below), so a crash there still
+    // counts against a just-applied update's launch-attempt limit.
+    let pending_swap = update_lifecycle::handle_startup();
+
     // Resolve the tool binaries to absolute paths up front (seeding yt-dlp into a
     // writable managed copy) so we never invoke a bare name the OS could resolve
     // to a planted binary, and yt-dlp merges with exactly the ffmpeg we shipped.
@@ -54,6 +65,9 @@ fn main() -> eframe::Result<()> {
         if arg == SELF_TEST_FLAG {
             return self_test();
         }
+        if arg == FINISH_UPDATE_FLAG {
+            continue;
+        }
         cli_path.get_or_insert(arg);
     }
     let options = eframe::NativeOptions {
@@ -68,7 +82,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(App::new(cc, cli_path.map(PathBuf::from))))
+            Ok(Box::new(App::new(cc, cli_path.map(PathBuf::from), pending_swap)))
         }),
     )
 }

@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::TryRecvError;
 use std::sync::Arc;
 use yt_dlp_clipper::export::{self, ExportSpec, Mode};
+use yt_dlp_clipper::updater;
 use yt_dlp_clipper::ytdlp;
 
 use crate::binaries::{clear_dir, managed_cache_dir};
@@ -84,7 +85,16 @@ impl Default for App {
 impl App {
     /// Build the app from persisted settings, applying the saved zoom and theme
     /// before the first frame, and open the video named on the command line.
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>, cli_path: Option<PathBuf>) -> Self {
+    /// `pending_swap` carries an in-progress self-update record forward from
+    /// `update_lifecycle::handle_startup` when this launch *is* the freshly
+    /// swapped-in build — `Jobs` clears it once a frame actually renders (see
+    /// `update()`), which is what tells the commit protocol startup didn't
+    /// wedge.
+    pub(crate) fn new(
+        cc: &eframe::CreationContext<'_>,
+        cli_path: Option<PathBuf>,
+        pending_swap: Option<updater::stage::PendingSwap>,
+    ) -> Self {
         let mut app = App::default();
         if let Some(storage) = cc.storage {
             app.settings = Settings::load(storage);
@@ -92,6 +102,15 @@ impl App {
             cc.egui_ctx.set_zoom_factor(app.settings.ui_scale);
         }
         apply_theme(&cc.egui_ctx, app.settings.theme);
+        app.jobs.pending_commit = pending_swap;
+        // Silent on failure and on a disabled toggle — a dead network or an
+        // opted-out user must never raise the error panel at launch.
+        if app.settings.check_updates_automatically
+            && app.settings.seconds_since_last_update_check() > updater::UPDATE_CHECK_INTERVAL_SECS
+        {
+            app.settings.mark_update_checked_now();
+            app.jobs.start_update_check();
+        }
         if let Some(path) = cli_path {
             app.load_video(path);
         }
@@ -160,6 +179,20 @@ impl App {
         }
     }
 
+    /// Clears the just-applied swap's backup/staging/state-file once this
+    /// process has reached an actual rendered frame — since this runs inside
+    /// `update()`, reaching it at all means startup didn't wedge, which is
+    /// what `update_lifecycle::handle_startup`'s launch-attempt counter is
+    /// watching for.
+    fn commit_applied_update(&mut self) {
+        let Some(pending) = self.jobs.pending_commit.take() else { return };
+        updater::stage::PendingSwap::clear(
+            &crate::binaries::update_state_path(),
+            &pending.staged,
+            &pending.backup,
+        );
+    }
+
     fn reset_for_new_video(&mut self) {
         self.playback.stop();
         self.jobs.clear_receiver();
@@ -210,8 +243,8 @@ impl App {
             return;
         }
         self.playback.stop();
-        if let Some(gen) = self.source.decoder.as_ref().map(|dec| dec.seek_secs(target)) {
-            self.playback.awaiting_release = Some((gen, target));
+        if let Some(generation) = self.source.decoder.as_ref().map(|dec| dec.seek_secs(target)) {
+            self.playback.awaiting_release = Some((generation, target));
         }
     }
 
@@ -320,11 +353,11 @@ impl App {
                             has_video: false,
                         })
                     }
-                    Ok(DecodeEvent::Frame { image, secs, gen }) => match awaiting {
+                    Ok(DecodeEvent::Frame { image, secs, generation }) => match awaiting {
                         // Waiting on a released seek: take only its frame, drop
                         // any superseded mid-drag decodes still arriving.
                         Some((await_gen, _)) => {
-                            if gen == await_gen {
+                            if generation == await_gen {
                                 latest_frame = Some((image, secs));
                                 landed = true;
                             }
@@ -447,7 +480,7 @@ impl App {
     }
 
     /// Requests are non-blocking; decoded frames arrive via `poll_decoder`. A
-    /// released seek records its gen so the playhead pins there until that exact
+    /// released seek records its generation so the playhead pins there until that exact
     /// frame lands; everything else clears any pending release.
     fn apply_nav(&mut self, nav: Nav) {
         // An audio-only source decodes no frames, so the playhead moves here
@@ -468,8 +501,8 @@ impl App {
                 None
             }
             Nav::Seek { secs, released } => {
-                let gen = dec.seek_secs(secs);
-                released.then_some((gen, secs))
+                let generation = dec.seek_secs(secs);
+                released.then_some((generation, secs))
             }
         });
         self.playback.awaiting_release = new_awaiting;
@@ -493,6 +526,8 @@ impl eframe::App for App {
         self.poll();
         self.jobs.poll_ytdlp_update();
         self.jobs.poll_update_check();
+        self.jobs.poll_update_apply();
+        self.commit_applied_update();
         self.poll_decoder(ctx);
         self.ui.cache.poll(ctx);
         ctx.request_repaint();
@@ -587,13 +622,12 @@ impl eframe::App for App {
                     .map(|d| (d.fps, d.current_secs, d.duration_secs));
                 match info {
                     Some((fps, video_t, dur)) if clock + 1.0 / fps.max(1.0) < dur => {
-                        if video_t + 1.0 / fps.max(1.0) <= clock {
-                            if let Some(dec) = &self.source.decoder {
-                                if clock - video_t > RESYNC_SECS {
-                                    dec.seek_secs(clock);
-                                } else {
-                                    dec.step_forward();
-                                }
+                        if video_t + 1.0 / fps.max(1.0) <= clock
+                            && let Some(dec) = &self.source.decoder {
+                            if clock - video_t > RESYNC_SECS {
+                                dec.seek_secs(clock);
+                            } else {
+                                dec.step_forward();
                             }
                         }
                     }

@@ -184,7 +184,9 @@ fn full_into_mkv_copies_streams() {
 #[test]
 fn full_transcodes_vp9_into_mp4() {
     // VP9 can't live in MP4 via copy, so Full must re-encode the video to H.264.
-    let out = run_from(common::vp9(), Mode::Full, "export_vp9_full.mp4", 0.0, common::DURATION_SECS);
+    let out = run_from(
+        common::vp9(), Mode::Full, "export_vp9_full.mp4", 0.0, common::DURATION_SECS,
+    );
     assert_eq!(codec_of(&out, "video"), "h264", "vp9 should be transcoded to h264");
 }
 
@@ -196,40 +198,52 @@ fn pix_fmt_of(path: &Path) -> String {
 #[test]
 fn compat_transcodes_av1_into_h264_in_mp4() {
     // AV1 fits MP4 but won't play on most phones, so compatibility mode re-encodes.
-    let out = run_from_compat(av1_in_mp4(), Mode::Full, "export_av1_compat.mp4", 0.0, common::DURATION_SECS, true);
+    let out = run_from_compat(
+        av1_in_mp4(), Mode::Full, "export_av1_compat.mp4", 0.0, common::DURATION_SECS, true,
+    );
     assert_eq!(codec_of(&out, "video"), "h264", "av1 should be transcoded to h264");
 }
 
 #[test]
 fn noncompat_copies_av1_into_mp4() {
-    let out = run_from_compat(av1_in_mp4(), Mode::Full, "export_av1_raw.mp4", 0.0, common::DURATION_SECS, false);
+    let out = run_from_compat(
+        av1_in_mp4(), Mode::Full, "export_av1_raw.mp4", 0.0, common::DURATION_SECS, false,
+    );
     assert_eq!(codec_of(&out, "video"), "av1", "av1 should be copied unchanged");
 }
 
 #[test]
 fn compat_reencodes_10bit_h264_to_8bit() {
     // 10-bit H.264 fits MP4 by codec but not by pixel format on mobile hardware.
-    let out = run_from_compat(h264_10bit(), Mode::Full, "export_10bit_compat.mp4", 0.0, common::DURATION_SECS, true);
+    let out = run_from_compat(
+        h264_10bit(), Mode::Full, "export_10bit_compat.mp4", 0.0, common::DURATION_SECS, true,
+    );
     assert_eq!(codec_of(&out, "video"), "h264");
     assert_eq!(pix_fmt_of(&out), "yuv420p", "10-bit should be re-encoded to 8-bit");
 }
 
 #[test]
 fn noncompat_copies_10bit_h264() {
-    let out = run_from_compat(h264_10bit(), Mode::Full, "export_10bit_raw.mp4", 0.0, common::DURATION_SECS, false);
+    let out = run_from_compat(
+        h264_10bit(), Mode::Full, "export_10bit_raw.mp4", 0.0, common::DURATION_SECS, false,
+    );
     assert_eq!(pix_fmt_of(&out), "yuv420p10le", "10-bit should be preserved");
 }
 
 #[test]
 fn compat_reencodes_ac3_audio_to_aac() {
     // AC-3 fits MP4 by copy but doesn't decode on iOS, so compatibility re-encodes.
-    let out = run_from_compat(h264_with_ac3(), Mode::Full, "export_ac3_compat.mp4", 0.0, common::DURATION_SECS, true);
+    let out = run_from_compat(
+        h264_with_ac3(), Mode::Full, "export_ac3_compat.mp4", 0.0, common::DURATION_SECS, true,
+    );
     assert_eq!(codec_of(&out, "audio"), "aac", "ac3 should be transcoded to aac");
 }
 
 #[test]
 fn noncompat_copies_ac3_into_mp4() {
-    let out = run_from_compat(h264_with_ac3(), Mode::Full, "export_ac3_raw.mp4", 0.0, common::DURATION_SECS, false);
+    let out = run_from_compat(
+        h264_with_ac3(), Mode::Full, "export_ac3_raw.mp4", 0.0, common::DURATION_SECS, false,
+    );
     assert_eq!(codec_of(&out, "audio"), "ac3", "ac3 should be copied unchanged");
 }
 

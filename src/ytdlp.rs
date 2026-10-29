@@ -128,11 +128,11 @@ pub struct Format {
 
 impl Format {
     pub fn has_video(&self) -> bool {
-        self.vcodec.as_deref().map_or(false, |c| c != "none")
+        self.vcodec.as_deref().is_some_and(|c| c != "none")
     }
 
     pub fn has_audio(&self) -> bool {
-        self.acodec.as_deref().map_or(false, |c| c != "none")
+        self.acodec.as_deref().is_some_and(|c| c != "none")
     }
 
     /// Exact size if known, otherwise yt-dlp's approximate estimate.
@@ -169,7 +169,7 @@ fn best_video(formats: &[Format], max_height: Option<u32>) -> Option<&Format> {
     formats
         .iter()
         .filter(|f| f.has_video())
-        .filter(|f| max_height.map_or(true, |th| f.height.map_or(false, |h| h <= th)))
+        .filter(|f| max_height.is_none_or(|th| f.height.is_some_and(|h| h <= th)))
         .max_by_key(|f| f.height.unwrap_or(0))
 }
 
@@ -231,17 +231,13 @@ pub fn estimated_size(
 ) -> Option<u64> {
     let mut total = 0;
     let mut known = false;
-    if want_video {
-        if let Some(bytes) = best_video(&info.formats, height).and_then(Format::size) {
-            total += bytes;
-            known = true;
-        }
+    if want_video && let Some(bytes) = best_video(&info.formats, height).and_then(Format::size) {
+        total += bytes;
+        known = true;
     }
-    if want_audio {
-        if let Some(bytes) = best_audio(&info.formats).and_then(Format::size) {
-            total += bytes;
-            known = true;
-        }
+    if want_audio && let Some(bytes) = best_audio(&info.formats).and_then(Format::size) {
+        total += bytes;
+        known = true;
     }
     known.then_some(total)
 }
@@ -427,14 +423,11 @@ pub fn download(
         let line = line.unwrap_or_default();
         if let Some(rest) = line.strip_prefix("PROGRESS ") {
             let fields: Vec<&str> = rest.split_whitespace().collect();
-            if let [downloaded, total, estimate] = fields[..] {
-                if let Ok(done) = downloaded.parse::<u64>() {
-                    let total = total.parse::<u64>().or_else(|_| estimate.parse::<u64>());
-                    if let Ok(total) = total {
-                        if total > 0 {
-                            on_progress(done, total);
-                        }
-                    }
+            if let [downloaded, total, estimate] = fields[..]
+                && let Ok(done) = downloaded.parse::<u64>() {
+                let total = total.parse::<u64>().or_else(|_| estimate.parse::<u64>());
+                if let Ok(total) = total && total > 0 {
+                    on_progress(done, total);
                 }
             }
         } else if let Some(path) = line.strip_prefix("OUTPUT ") {

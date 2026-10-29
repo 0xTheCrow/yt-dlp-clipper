@@ -1,7 +1,8 @@
 [package]
 name = "yt-dlp-clipper"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 description = "Pull videos with yt-dlp and trim them frame-accurately"
 
 [lib]

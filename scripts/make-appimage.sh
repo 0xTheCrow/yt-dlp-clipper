@@ -64,8 +64,10 @@ chmod +x "$APPDIR/usr/bin/"*
 
 echo "==> Packing AppImage"
 # Pin the output filename (else the appimage plugin derives it from the desktop
-# entry's Name=, "Cooper Clipper", and the release workflow's upload glob misses it).
-export OUTPUT="yt-dlp-clipper-${VERSION}-x86_64.AppImage"
+# entry's Name=, "Cooper Clipper", and the release workflow's upload glob misses
+# it). Deliberately version-less: self-update replaces this file's *contents* in
+# place, so a version-stamped name would start lying the first time it runs.
+export OUTPUT="yt-dlp-clipper-x86_64.AppImage"
 "$BUILD/linuxdeploy.AppImage" \
     --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/yt-dlp-clipper" \

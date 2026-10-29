@@ -8,6 +8,35 @@ pub(crate) fn managed_cache_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+/// On-disk record of an in-progress/just-applied self-update swap; see
+/// `updater::stage::PendingSwap`.
+pub(crate) fn update_state_path() -> PathBuf {
+    eframe::storage_dir(STORAGE_APP_ID)
+        .map(|d| d.join("update-state.json"))
+        .unwrap_or_else(|| std::env::temp_dir().join("yt-dlp-clipper-update-state.json"))
+}
+
+/// Directory holding the pre-swap backup, kept until the swapped-in build
+/// commits or the launch-attempt limit rolls it back.
+pub(crate) fn update_backup_dir() -> PathBuf {
+    let dir = eframe::storage_dir(STORAGE_APP_ID)
+        .map(|d| d.join("backup"))
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Directory a release's downloaded/staged payload lands in before it's
+/// probed and swapped into place. Kept until commit so a rollback can retry
+/// without re-downloading.
+pub(crate) fn update_staging_dir(version: &str) -> PathBuf {
+    let dir = eframe::storage_dir(STORAGE_APP_ID)
+        .map(|d| d.join("updates").join(version))
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// Platform filenames for the bundled tool binaries.
 #[cfg(windows)]
 const YTDLP_EXE: &str = "yt-dlp.exe";
@@ -150,10 +179,8 @@ fn embedded_qjs() -> Option<PathBuf> {
 /// Order: managed copy → bundled file (bin/ or next to exe) → PATH → embedded bytes.
 pub(crate) fn resolve_ytdlp() -> Option<PathBuf> {
     let managed = managed_bin_dir().map(|d| d.join(YTDLP_EXE));
-    if let Some(m) = &managed {
-        if m.is_file() {
-            return Some(m.clone());
-        }
+    if let Some(m) = &managed && m.is_file() {
+        return Some(m.clone());
     }
     if let Some(source) = bundled_binary(YTDLP_EXE).or_else(|| find_in_path(YTDLP_EXE)) {
         return match &managed {

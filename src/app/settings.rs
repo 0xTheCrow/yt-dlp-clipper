@@ -16,6 +16,8 @@ const VOLUME_KEY: &str = "volume";
 const THEME_KEY: &str = "theme";
 const KEYBINDS_KEY: &str = "keybinds";
 const COOKIES_KEY: &str = "cookies_source";
+const CHECK_UPDATES_AUTOMATICALLY_KEY: &str = "check_updates_automatically";
+const LAST_UPDATE_CHECK_KEY: &str = "last_update_check_epoch_secs";
 
 pub(crate) const DEFAULT_UI_SCALE: f32 = 1.0;
 const DEFAULT_VOLUME: f32 = 0.5;
@@ -46,6 +48,13 @@ pub(crate) struct Settings {
     /// or an exported `cookies.txt` — so age-gated or members-only videos work.
     /// `None` sends no cookies.
     pub(crate) cookies: Option<CookieSource>,
+    /// Check GitHub for a newer app release on launch. On by default; off
+    /// means fully silent — no background check at all, not just a hidden one.
+    pub(crate) check_updates_automatically: bool,
+    /// Unix timestamp of the last automatic update check, of either outcome,
+    /// so `UPDATE_CHECK_INTERVAL_SECS` survives a restart instead of
+    /// re-checking every launch.
+    pub(crate) last_update_check_epoch_secs: u64,
 }
 
 impl Default for Settings {
@@ -61,6 +70,8 @@ impl Default for Settings {
             volume: DEFAULT_VOLUME,
             keybinds: Keybinds::default(),
             cookies: None,
+            check_updates_automatically: true,
+            last_update_check_epoch_secs: 0,
         }
     }
 }
@@ -83,6 +94,10 @@ impl Settings {
             volume: eframe::get_value(storage, VOLUME_KEY).unwrap_or(defaults.volume),
             keybinds: load_keybinds(storage),
             cookies: eframe::get_value(storage, COOKIES_KEY).flatten(),
+            check_updates_automatically: eframe::get_value(storage, CHECK_UPDATES_AUTOMATICALLY_KEY)
+                .unwrap_or(defaults.check_updates_automatically),
+            last_update_check_epoch_secs: eframe::get_value(storage, LAST_UPDATE_CHECK_KEY)
+                .unwrap_or(defaults.last_update_check_epoch_secs),
         }
     }
 
@@ -97,12 +112,39 @@ impl Settings {
         eframe::set_value(storage, VOLUME_KEY, &self.volume);
         save_keybinds(storage, &self.keybinds);
         eframe::set_value(storage, COOKIES_KEY, &self.cookies);
+        eframe::set_value(
+            storage,
+            CHECK_UPDATES_AUTOMATICALLY_KEY,
+            &self.check_updates_automatically,
+        );
+        eframe::set_value(storage, LAST_UPDATE_CHECK_KEY, &self.last_update_check_epoch_secs);
     }
 
     /// Where downloads land: the configured folder, else the managed cache dir.
     pub(crate) fn effective_download_dir(&self) -> PathBuf {
         self.download_dir.clone().unwrap_or_else(managed_cache_dir)
     }
+
+    /// Seconds since the last automatic update check; a fresh install (whose
+    /// `last_update_check_epoch_secs` is still `0`) reads as "a very long
+    /// time," so it checks on first launch rather than waiting out the
+    /// interval from the Unix epoch.
+    pub(crate) fn seconds_since_last_update_check(&self) -> u64 {
+        now_epoch_secs().saturating_sub(self.last_update_check_epoch_secs)
+    }
+
+    /// Record that an automatic update check just ran, of either outcome, so a
+    /// persistent failure doesn't retry every launch.
+    pub(crate) fn mark_update_checked_now(&mut self) {
+        self.last_update_check_epoch_secs = now_epoch_secs();
+    }
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Each shortcut persists as (action id, key name, ctrl, shift) so it doesn't

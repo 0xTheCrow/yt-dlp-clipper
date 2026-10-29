@@ -25,6 +25,29 @@ fn av1() -> PathBuf {
     .clone()
 }
 
+/// AAC audio with no video stream in m4a, which does carry a per-stream
+/// duration — the other branch of the audio-only duration lookup.
+fn aac_audio_only() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        common::generate("fixture_aac_audio_only.m4a", &["-map", "1:a", "-c:a", "aac"])
+    })
+    .clone()
+}
+
+/// H.264 with a keyframe every 5 frames, so a multi-frame backward jump
+/// crosses several keyframe boundaries within the fixture's short duration.
+fn h264_short_gop() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        common::generate(
+            "fixture_h264_short_gop.mp4",
+            &["-c:v", "libx264", "-g", "5", "-c:a", "aac", "-shortest"],
+        )
+    })
+    .clone()
+}
+
 #[test]
 fn reports_dimensions_and_duration() {
     let dec = open(&common::h264_with_audio());
@@ -104,7 +127,7 @@ fn repeated_step_backward_keeps_moving_on_sparse_keyframes() {
 /// earlier keyframes rather than clamping to the start of that one GOP.
 #[test]
 fn large_backward_jump_crosses_keyframe_boundaries() {
-    let mut dec = open(&common::h264_short_gop());
+    let mut dec = open(&h264_short_gop());
     dec.seek_secs(2.5).expect("seek frame");
     let before = dec.current_secs();
     dec.step_by(-20).expect("frame 20 steps back");
@@ -143,7 +166,7 @@ fn decodes_av1() {
 #[test]
 fn open_rejects_a_source_with_no_video_stream() {
     common::init();
-    for input in [common::opus_audio_only(), common::aac_audio_only()] {
+    for input in [common::opus_audio_only(), aac_audio_only()] {
         assert!(
             Decoder::open(input.to_str().unwrap()).is_err(),
             "{} has no video stream, so the video decoder must not open it",
@@ -167,7 +190,7 @@ fn audio_duration_matches_the_source_without_a_stream_duration() {
 #[test]
 fn audio_duration_matches_the_source_carrying_a_stream_duration() {
     common::init();
-    let secs = audio_duration_secs(common::aac_audio_only().to_str().unwrap())
+    let secs = audio_duration_secs(aac_audio_only().to_str().unwrap())
         .expect("m4a audio-only duration");
     assert!(
         (secs - common::DURATION_SECS).abs() < 0.2,

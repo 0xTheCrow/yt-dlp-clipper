@@ -43,10 +43,9 @@ pub(crate) fn show(
                     |ui| {
                         ui.label("Save as:");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(folder_label).on_hover_text(folder_hover).clicked() {
-                                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                    settings.output_dir = Some(folder);
-                                }
+                            if ui.button(folder_label).on_hover_text(folder_hover).clicked()
+                                && let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                settings.output_dir = Some(folder);
                             }
                             ui.label("Save to:");
                             ui.add_space(SAVE_TARGET_GAP);

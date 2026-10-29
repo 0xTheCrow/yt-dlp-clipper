@@ -185,19 +185,15 @@ pub(crate) fn timeline(
             ],
         )
     };
-    if response.drag_started() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            let grabbed = grabbed_marker(pos.x);
-            clip.timeline_drag = Some(grabbed.unwrap_or(TimelineDrag::Playhead));
-            if grabbed.is_some() {
-                clip.begin_gesture();
-            }
+    if response.drag_started() && let Some(pos) = response.interact_pointer_pos() {
+        let grabbed = grabbed_marker(pos.x);
+        clip.timeline_drag = Some(grabbed.unwrap_or(TimelineDrag::Playhead));
+        if grabbed.is_some() {
+            clip.begin_gesture();
         }
     }
-    if let Some(pos) = response.hover_pos() {
-        if grabbed_marker(pos.x).is_some() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        }
+    if let Some(pos) = response.hover_pos() && grabbed_marker(pos.x).is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
 
     let mut result = None;
@@ -213,12 +209,11 @@ pub(crate) fn timeline(
                 TimelineDrag::Playhead => {}
             }
         }
-    } else if response.dragged() || response.clicked() || response.drag_stopped() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            let t = axis.secs_at(pos.x);
-            live_pos = Some(t);
-            result = Some((t, response.drag_stopped() || response.clicked()));
-        }
+    } else if (response.dragged() || response.clicked() || response.drag_stopped())
+        && let Some(pos) = response.interact_pointer_pos() {
+        let t = axis.secs_at(pos.x);
+        live_pos = Some(t);
+        result = Some((t, response.drag_stopped() || response.clicked()));
     }
     if response.drag_stopped() {
         clip.commit_gesture();

@@ -4,9 +4,9 @@ use std::thread;
 use yt_dlp_clipper::decoder::{audio_duration_secs, Decoder};
 
 pub(crate) enum DecodeRequest {
-    Seek { secs: f64, gen: u64 },
-    StepForward { gen: u64 },
-    StepBackward { gen: u64 },
+    Seek { secs: f64, generation: u64 },
+    StepForward { generation: u64 },
+    StepBackward { generation: u64 },
 }
 
 pub(crate) enum DecodeEvent {
@@ -14,9 +14,9 @@ pub(crate) enum DecodeEvent {
     /// The file has audio but no video stream: there is a timeline and an
     /// audio-only export to make from it, but no frames will ever arrive.
     OpenedAudioOnly { duration_secs: f64 },
-    /// `gen` echoes the request that produced this frame, so the UI can ignore
+    /// `generation` echoes the request that produced this frame, so the UI can ignore
     /// frames from superseded seeks (e.g. mid-drag decodes after a release).
-    Frame { image: egui::ColorImage, secs: f64, gen: u64 },
+    Frame { image: egui::ColorImage, secs: f64, generation: u64 },
     Error(String),
 }
 
@@ -35,8 +35,8 @@ pub(crate) struct DecoderHandle {
     /// False for an audio-only source, whose playhead the UI advances itself
     /// because no decoded frame will arrive to carry it.
     pub(crate) has_video: bool,
-    /// Monotonic request id; each request returns the gen it was tagged with.
-    gen: AtomicU64,
+    /// Monotonic request id; each request returns the generation it was tagged with.
+    generation: AtomicU64,
 }
 
 impl DecoderHandle {
@@ -54,28 +54,28 @@ impl DecoderHandle {
             current_secs: 0.0,
             ready: false,
             has_video: false,
-            gen: AtomicU64::new(1),
+            generation: AtomicU64::new(1),
         }
     }
 
     fn next_gen(&self) -> u64 {
-        self.gen.fetch_add(1, Ordering::Relaxed)
+        self.generation.fetch_add(1, Ordering::Relaxed)
     }
 
     pub(crate) fn seek_secs(&self, secs: f64) -> u64 {
-        let gen = self.next_gen();
-        let _ = self.req_tx.send(DecodeRequest::Seek { secs, gen });
-        gen
+        let generation = self.next_gen();
+        let _ = self.req_tx.send(DecodeRequest::Seek { secs, generation });
+        generation
     }
     pub(crate) fn step_forward(&self) -> u64 {
-        let gen = self.next_gen();
-        let _ = self.req_tx.send(DecodeRequest::StepForward { gen });
-        gen
+        let generation = self.next_gen();
+        let _ = self.req_tx.send(DecodeRequest::StepForward { generation });
+        generation
     }
     pub(crate) fn step_backward(&self) -> u64 {
-        let gen = self.next_gen();
-        let _ = self.req_tx.send(DecodeRequest::StepBackward { gen });
-        gen
+        let generation = self.next_gen();
+        let _ = self.req_tx.send(DecodeRequest::StepBackward { generation });
+        generation
     }
 }
 
@@ -112,7 +112,11 @@ fn decoder_loop(path: String, req_rx: Receiver<DecodeRequest>, event_tx: Sender<
     // blank preview. Surface a named error instead.
     match dec.step_forward() {
         Some(image) => {
-            let _ = event_tx.send(DecodeEvent::Frame { image, secs: dec.current_secs(), gen: 0 });
+            let _ = event_tx.send(DecodeEvent::Frame {
+                image,
+                secs: dec.current_secs(),
+                generation: 0,
+            });
         }
         None => {
             let _ = event_tx.send(DecodeEvent::Error(format!(
@@ -131,22 +135,22 @@ fn decoder_loop(path: String, req_rx: Receiver<DecodeRequest>, event_tx: Sender<
         // backward jump becomes a single seek rather than one seek per frame.
         let mut seek: Option<f64> = None;
         let mut steps: i64 = 0;
-        let mut gen = 0;
+        let mut generation = 0;
         let mut req = Some(first);
         while let Some(r) = req {
             match r {
-                DecodeRequest::Seek { secs, gen: g } => {
+                DecodeRequest::Seek { secs, generation: g } => {
                     seek = Some(secs);
                     steps = 0;
-                    gen = g;
+                    generation = g;
                 }
-                DecodeRequest::StepForward { gen: g } => {
+                DecodeRequest::StepForward { generation: g } => {
                     steps += 1;
-                    gen = g;
+                    generation = g;
                 }
-                DecodeRequest::StepBackward { gen: g } => {
+                DecodeRequest::StepBackward { generation: g } => {
                     steps -= 1;
-                    gen = g;
+                    generation = g;
                 }
             }
             req = req_rx.try_recv().ok();
@@ -159,13 +163,11 @@ fn decoder_loop(path: String, req_rx: Receiver<DecodeRequest>, event_tx: Sender<
         if steps != 0 {
             image = dec.step_by(steps);
         }
-        if let Some(image) = image {
-            if event_tx
-                .send(DecodeEvent::Frame { image, secs: dec.current_secs(), gen })
-                .is_err()
-            {
-                return;
-            }
+        if let Some(image) = image
+            && event_tx
+                .send(DecodeEvent::Frame { image, secs: dec.current_secs(), generation })
+                .is_err() {
+            return;
         }
     }
 }

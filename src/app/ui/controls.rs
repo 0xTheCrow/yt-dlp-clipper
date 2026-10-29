@@ -207,10 +207,8 @@ pub(crate) fn clip_controls(
             let vol = ui.add(
                 egui::Slider::new(&mut settings.volume, 0.0..=1.0).show_value(false),
             );
-            if vol.changed() {
-                if let Some(audio) = &playback.audio {
-                    audio.set_volume(settings.volume);
-                }
+            if vol.changed() && let Some(audio) = &playback.audio {
+                audio.set_volume(settings.volume);
             }
             ui.label("🔊");
         },

@@ -50,7 +50,9 @@ jobs:
       - uses: actions/upload-artifact@v5
         with:
           name: linux
-          path: yt-dlp-clipper-*-x86_64.AppImage
+          # Version-less by design (see make-appimage.sh) so self-update can
+          # replace this file's contents in place without its name going stale.
+          path: yt-dlp-clipper-x86_64.AppImage
 
   windows:
     # One self-contained .exe: FFmpeg, the codecs, and the C runtime are all linked
@@ -181,7 +183,11 @@ jobs:
       - uses: actions/upload-artifact@v5
         with:
           name: macos
-          path: yt-dlp-clipper-*-macos-*.dmg
+          # .dmg for fresh installs; .zip of the bare .app is self-update's
+          # payload (a .dmg is a distribution container, not a swap target).
+          path: |
+            yt-dlp-clipper-*-macos-*.dmg
+            yt-dlp-clipper-*-macos-*.zip
 
   release:
     needs: [linux, windows, macos]

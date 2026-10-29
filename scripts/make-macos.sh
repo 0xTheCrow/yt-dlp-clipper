@@ -131,6 +131,16 @@ dylibbundler -cd -b \
     -d "$APP/Contents/libs" \
     -p "@executable_path/../libs"
 
+# --- package a .zip of the .app (self-update payload) -------------------------
+# A .dmg is a distribution container, not something self-update can stage and
+# swap into place; it needs the bare .app as a .zip instead. ditto (not zip -r)
+# preserves the bundle's resource forks/extended attributes and code-signing
+# layout the way Finder's own "Compress" does.
+echo "==> Building .zip"
+ZIP="$ROOT/yt-dlp-clipper-$VERSION-macos-$ARCH.zip"
+rm -f "$ZIP"
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+
 # --- package a .dmg -----------------------------------------------------------
 echo "==> Building .dmg"
 DMG="$ROOT/yt-dlp-clipper-$VERSION-macos-$ARCH.dmg"
@@ -161,3 +171,4 @@ done
 echo "==> Done:"
 echo "    app: $APP"
 echo "    dmg: $DMG"
+echo "    zip: $ZIP"
