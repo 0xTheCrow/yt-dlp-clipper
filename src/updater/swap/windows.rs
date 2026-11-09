@@ -3,9 +3,6 @@ use crate::updater::stage::PendingSwap;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-/// Unverified from the Linux dev/CI sandbox this was written in — mirrors
-/// CLAUDE.md's documented Windows swap mechanics exactly, but needs a real
-/// Windows run to confirm.
 pub fn current_install_target() -> Result<PathBuf> {
     std::env::current_exe().context("resolving the running exe's path")
 }
