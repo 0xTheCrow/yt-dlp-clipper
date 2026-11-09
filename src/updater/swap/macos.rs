@@ -4,10 +4,6 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Unverified from the Linux dev/CI sandbox this was written in — mirrors
-/// CLAUDE.md's documented macOS swap mechanics exactly, but needs a real
-/// macOS run to confirm.
-
 /// Climb from the running executable (`<App>.app/Contents/MacOS/<App>`) to the
 /// `.app` bundle root, since that whole directory is the thing self-update
 /// replaces, not just the executable inside it.

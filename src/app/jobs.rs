@@ -349,8 +349,8 @@ fn staged_and_probe_paths(
 
 /// Write `pending` to disk, perform the platform swap, and hand off to the new
 /// build. Never returns on success — the process exits. Only valid when idle;
-/// the Settings/banner button disables itself otherwise (CLAUDE.md's restart
-/// gate) so an export or download is never interrupted.
+/// the Settings/banner button disables itself otherwise so an export or
+/// download is never interrupted.
 pub(crate) fn apply_update(pending: &PendingSwap) -> anyhow::Result<()> {
     pending.write(&crate::binaries::update_state_path())?;
     swap::apply(pending)?;
